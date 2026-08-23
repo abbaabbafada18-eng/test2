@@ -5152,10 +5152,14 @@ mod tests {
         // worse than not warming at all: the entry is evicted before T0 and the
         // handshake is paid twice.
         const REQWEST_POOL_IDLE_MS: i64 = 90_000;
-        assert!(
-            CONNECTION_WARM_LEAD_MS < REQWEST_POOL_IDLE_MS,
-            "connections warmed this early are reaped before the fire"
-        );
+        // A const block, because both sides are constants: the check belongs to
+        // the compile, not to the run.
+        const {
+            assert!(
+                CONNECTION_WARM_LEAD_MS < REQWEST_POOL_IDLE_MS,
+                "connections warmed this early are reaped before the fire"
+            )
+        };
     }
 
     #[test]
