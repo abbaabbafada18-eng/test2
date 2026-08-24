@@ -391,7 +391,14 @@ impl Session {
     }
 
     pub fn default_paths() -> Self {
-        Self::with_paths("keys.vault", "config.json", ".env")
+        // Absolute, from wherever this installation keeps its data — the bare
+        // names used to be resolved against whatever directory the program
+        // happened to be started from.
+        Self::with_paths(
+            crate::paths::data_file(crate::types::VAULT_FILE),
+            crate::paths::data_file("config.json"),
+            crate::paths::data_file(".env"),
+        )
     }
 
     pub fn config_path(&self) -> &Path {

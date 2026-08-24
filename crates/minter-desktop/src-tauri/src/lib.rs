@@ -1511,17 +1511,25 @@ fn app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// Where this installation keeps wallets, settings, results and logs.
+///
+/// Shown in Settings because until now the only way to find out was to guess,
+/// and guessing wrong is what "my wallets are gone" usually turns out to be.
+#[tauri::command]
+fn data_dir() -> String {
+    minter_core::data_root().display().to_string()
+}
+
 /// Resolve a runtime output directory, creating it and reporting real failures.
 ///
 /// Deliberately cwd-relative: `minter_core::export` writes to a bare
 /// `results/` path (`export.rs:58`), so anchoring the desktop side to
-/// `app_data_dir` would make "Open results folder" show an always-empty
-/// directory while the exports landed elsewhere. Both sides must agree, so the
-/// location stays and only the swallowed error is fixed.
+/// Both sides have to agree on one place, or "Open results folder" shows an
+/// empty directory while the exports land somewhere else. That one place is now
+/// [`minter_core::data_root`], which is also where the vault and the config
+/// live, so nothing can drift apart again.
 fn runtime_dir(name: &str) -> Result<std::path::PathBuf, String> {
-    let p = std::env::current_dir()
-        .map_err(|e| format!("cannot resolve working directory: {e}"))?
-        .join(name);
+    let p = minter_core::data_file(name);
     // Was `let _ = create_dir_all(...)`: on a read-only or non-writable cwd the
     // path was still returned as if valid, and the operator only found out when
     // an export silently failed later.
@@ -2605,6 +2613,7 @@ pub fn run() {
             warm_rpc_latency,
             measure_fire_lag,
             transfer_fee,
+            data_dir,
             load_wallet_meta,
             save_wallet_meta,
             pick_files,

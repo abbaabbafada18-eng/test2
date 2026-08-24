@@ -11,6 +11,10 @@ WorkingDirectory=/var/lib/minter
 RuntimeDirectory=minter
 RuntimeDirectoryMode=0700
 Environment=HOME=/var/lib/minter
+# Said outright rather than inferred from the working directory: the service
+# and the desktop then agree on one place without depending on how either
+# happens to be started.
+Environment=MINTER_DATA_DIR=/var/lib/minter
 Environment=XDG_RUNTIME_DIR=/run/minter
 Environment=DISPLAY=:99
 Environment=GDK_BACKEND=x11

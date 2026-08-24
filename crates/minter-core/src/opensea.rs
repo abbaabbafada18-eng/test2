@@ -331,15 +331,13 @@ fn gql_request(client: &reqwest::Client) -> reqwest::RequestBuilder {
         .header("x-graphql-operation-type", "query")
 }
 
+/// Beside the rest of this installation's data, not beside the executable.
+///
+/// The two were the same folder on Windows and nowhere near each other for the
+/// Linux service, which is how the auth cache ended up somewhere the operator
+/// never looked.
 fn debug_file_next_to_exe(name: &str) -> std::path::PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(|parent| parent.join(name)))
-        .unwrap_or_else(|| {
-            std::env::current_dir()
-                .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                .join(name)
-        })
+    crate::paths::data_file(name)
 }
 
 /// Upper bound on any honoured server wait. Beyond this the drop is over

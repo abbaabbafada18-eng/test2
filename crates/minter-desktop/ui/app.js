@@ -250,11 +250,19 @@ function flashConfirmBadge(payload) {
   }
 }
 
+/** Where this installation keeps wallets, settings, results and logs. */
+let dataDirStr = "";
+
 async function loadAppVersion() {
   try {
     appVersionStr = await invoke("app_version");
   } catch {
     appVersionStr = "0.1.0";
+  }
+  try {
+    dataDirStr = await invoke("data_dir");
+  } catch {
+    dataDirStr = "";
   }
   const el = $("app-version");
   if (el) el.textContent = "v" + appVersionStr;
@@ -2031,7 +2039,14 @@ $("btn-proxy-health")?.addEventListener("click", async () => {
 async function loadSettings() {
   const s = await invokeSafe("get_settings");
   if (!s) return;
-  $("settings-path").textContent = s.configPath ? `File: ${s.configPath}` : "";
+  // The folder is what people look for when wallets seem to have vanished —
+  // naming only the config file leaves the vault unaccounted for.
+  $("settings-path").textContent = [
+    dataDirStr ? `${t("settings.dataDir") || "Data folder"}: ${dataDirStr}` : "",
+    s.configPath ? `${t("settings.configFile") || "Config"}: ${s.configPath}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
   $("set-alchemy").value = "";
   $("set-alchemy").placeholder = s.alchemyMasked
     ? `Stored ${s.alchemyMasked} — leave blank to keep`

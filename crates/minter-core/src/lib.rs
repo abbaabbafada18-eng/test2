@@ -40,6 +40,7 @@ pub mod mint;
 pub mod mint_ops;
 pub mod multicall;
 pub mod opensea;
+pub mod paths;
 pub mod progress;
 pub mod proxy;
 pub mod raw_mint;
@@ -146,6 +147,7 @@ pub use mint_ops::{
     flashbots_status_label, is_on_chain_confirm_status, mint_busy_message, normalize_addr_key,
     parse_at_time_unix, reauth_required_message,
 };
+pub use paths::{data_file, data_root};
 pub use progress::{MintEvent, MintReporter, NullReporter};
 pub use raw_sniper::{RawSniperConfig, SniperPreset, ValueMode};
 pub use safety_policy::{
