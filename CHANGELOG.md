@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-08-24
+
+### Added
+
+- Disperse can fund only the wallets that actually hold the whitelist. Which
+  wallets are on a list is knowledge the WL check already has, and picking them
+  by hand out of a numbered column is where it goes wrong: the eligible ones are
+  1, 6, 12, 34, 53 — not 1 through 5. The saved check now drives the selection,
+  and eligible rows carry a WL tag so the choice is visible rather than implied.
+
+### Fixed
+
+- The disperse cost line no longer prices every transfer at Ethereum mainnet.
+  It used a fixed 21 000 gas at 30 gwei, which on the L2s these runs actually
+  use is roughly a thousand times too much — enough to paint a well-funded
+  wallet as short of funds and stop a run that would have gone through. The
+  chain is asked instead, once per chain and cached, using the same gas floor
+  the engine applies and including the OP chains' separate L1 data fee. When the
+  RPC cannot be reached the old figure stands in, because a summary line with no
+  number at all breaks the balance check outright.
+
+- The update banner told Linux operators to unzip over their folder. There is no
+  such folder on a server install: the binary lives in `/opt/minter` and the data
+  in `/var/lib/minter`, and updating means re-running the installer. The banner
+  now asks the running build which system it is on — the page could only have
+  guessed — and says the right one. The published release notes carry both paths
+  under separate headings.
+
 ## [1.0.1] - 2026-08-24
 
 ### Added
@@ -225,7 +253,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Session / vault Debug redaction
 - Wave A–D hardening (LIVE gate, fee caps, zero-address rejects, OpenSea value checks, etc.)
 
-[Unreleased]: https://github.com/MaxBetov-pdd/Minter-rs-v2/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/MaxBetov-pdd/Minter-rs-v2/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/MaxBetov-pdd/Minter-rs-v2/releases/tag/v1.0.2
 [1.0.1]: https://github.com/MaxBetov-pdd/Minter-rs-v2/releases/tag/v1.0.1
 [0.2.2]: https://github.com/MaxBetov-pdd/Minter-rs-v2/releases/tag/v0.2.2
 [0.2.1]: https://github.com/MaxBetov-pdd/Minter-rs-v2/releases/tag/v0.2.1

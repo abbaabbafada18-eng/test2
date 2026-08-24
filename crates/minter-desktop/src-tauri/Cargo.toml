@@ -1,6 +1,6 @@
 [package]
 name = "minter-desktop"
-version = "1.0.1"
+version = "1.0.2"
 description = "MINTER desktop — OpenSea drop minter & raw sniper (Tauri 2, Windows)"
 edition = "2021"
 license = "MIT OR Apache-2.0"
