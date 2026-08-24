@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-24
+
+### Changed
+
+- The program now looks for its data instead of assuming it is underfoot.
+
+  Until now everything — vault, settings, results, logs — lived in whatever
+  directory the program was started from. That is the program's own folder when
+  it is double-clicked on Windows and `/var/lib/minter` for the Linux service,
+  right in both cases and wrong everywhere else. Unzipping an update somewhere
+  new opened an empty program while the wallets sat in the old folder, and an
+  app launched from macOS Finder would try to create `results/` at the root of
+  the disk.
+
+  Nothing is moved or copied — a vault is the one file where a stray second copy
+  is worse than any inconvenience, and an interrupted move is worse still.
+  Instead the location is resolved once at startup, in order: `MINTER_DATA_DIR`
+  when it is set; the working directory if the vault is already there; the
+  executable's own folder if it is there; the note the program left itself last
+  time, if that folder still holds data; and only then a per-user directory of
+  the platform's own.
+
+  **Nothing changes for an existing install.** Windows operators keep their data
+  in the program folder, and the Linux service keeps `/var/lib/minter` — both
+  are caught by the second rule, and the systemd unit now says so outright
+  rather than relying on the working directory.
+
+  The note is what makes an update unzipped into a new folder open with the
+  wallets already there, which was the trap this began with. Eight tests cover
+  the order, including the case where a second portable copy with its own vault
+  must stay its own install rather than adopt the first one's data.
+
+- Settings now name the data folder. Finding it was previously a matter of
+  guessing, and guessing wrong is what "my wallets are gone" usually turns out
+  to be.
+
 ## [1.0.2] - 2026-08-24
 
 ### Added
@@ -253,7 +289,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Session / vault Debug redaction
 - Wave A–D hardening (LIVE gate, fee caps, zero-address rejects, OpenSea value checks, etc.)
 
-[Unreleased]: https://github.com/MaxBetov-pdd/Minter-rs-v2/compare/v1.0.2...HEAD
+[Unreleased]: https://github.com/MaxBetov-pdd/Minter-rs-v2/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/MaxBetov-pdd/Minter-rs-v2/releases/tag/v1.1.0
 [1.0.2]: https://github.com/MaxBetov-pdd/Minter-rs-v2/releases/tag/v1.0.2
 [1.0.1]: https://github.com/MaxBetov-pdd/Minter-rs-v2/releases/tag/v1.0.1
 [0.2.2]: https://github.com/MaxBetov-pdd/Minter-rs-v2/releases/tag/v0.2.2
