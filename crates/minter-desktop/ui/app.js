@@ -4064,8 +4064,7 @@ function updateDisperseSummary() {
   }
   const n = BigInt(to.length);
   const total = wei * n;
-  // Rough per-tx gas allowance for the estimate line (21k × 30 gwei).
-  const gas = 21000n * 30000000000n * n;
+  const gas = disperseFeePerTx() * n;
   if (card) {
     card.classList.remove("hidden");
     const line = $("disp-total-line");
@@ -4085,6 +4084,42 @@ function updateDisperseSummary() {
     }
   }
   if (el) el.textContent = "";
+}
+
+/**
+ * What one transfer costs on the selected chain, in wei.
+ *
+ * This used to be a constant — 21 000 gas at 30 gwei — which is Ethereum, not
+ * the L2s these runs use. On Base or Ink the real figure is a thousandth of it,
+ * so the line frightened people with a number that was wrong by three orders of
+ * magnitude, and could paint a wallet holding plenty as short of funds.
+ *
+ * The chain is asked instead, once per chain, and the answer cached. Until it
+ * arrives the old mainnet figure is used: an estimate too high is a bad number
+ * to show, but a *missing* one stops the balance check working at all.
+ */
+const FEE_FALLBACK_WEI = 21000n * 30000000000n;
+const feeCache = new Map();
+
+function disperseFeePerTx() {
+  const chain = ($("disp-chain")?.value || "").trim().toLowerCase();
+  const hit = feeCache.get(chain);
+  return hit == null ? FEE_FALLBACK_WEI : hit;
+}
+
+async function refreshDisperseFee() {
+  const chain = ($("disp-chain")?.value || "").trim().toLowerCase();
+  if (!chain || feeCache.has(chain)) return;
+  try {
+    const r = await invoke("transfer_fee", { input: { chain } });
+    feeCache.set(chain, BigInt(r.perTxWei));
+  } catch (e) {
+    // An unreachable RPC is not worth an error box on a summary line; the
+    // fallback keeps the screen usable and the next chain change retries.
+    console.warn("transfer_fee", e);
+    return;
+  }
+  updateDisperseSummary();
 }
 
 /** Cached balance of the selected source wallet, in wei, or null if unknown. */
@@ -4156,10 +4191,14 @@ function renderDisperseToList() {
     const row = document.createElement("label");
     row.className = "task-wallet-row";
     const checked = keepPrev ? prev.has(String(w.address).toLowerCase()) : true;
+    const wlTag =
+      disperseWlSet && disperseWlSet.has(String(w.address).toLowerCase())
+        ? ` <span class="wl-tag" title="${escapeHtml(t("tasks.wlEligible") || "WL eligible")}">WL</span>`
+        : "";
     row.innerHTML = `<input type="checkbox" class="disp-to-cb" value="${escapeHtml(w.address)}" ${
       checked ? "checked" : ""
     } />
-      <span>${w.index}. ${escapeHtml(shortAddr(w.address))}</span>`;
+      <span>${w.index}. ${escapeHtml(shortAddr(w.address))}${wlTag}</span>`;
     toBox.appendChild(row);
   }
   if ($("disp-to-all")) {
@@ -4172,6 +4211,96 @@ function renderDisperseToList() {
 function selectedDisperseTo() {
   return [...document.querySelectorAll(".disp-to-cb:checked")].map((cb) => cb.value);
 }
+
+// —— Fund the wallets that actually hold the whitelist ——
+//
+// Which wallets are on a list is knowledge the WL check already has, and
+// picking them by hand from a numbered column is where it goes wrong: the
+// eligible ones are 1, 6, 12, 34, 53, not 1 through 5. So the saved check is
+// read back here, the same file the task modal uses.
+let disperseWlPhases = null;
+let disperseWlSet = null;
+
+/** Addresses of the chosen phase, or of every phase when none is chosen. */
+function disperseWlAddresses() {
+  if (!disperseWlPhases?.length) return new Set();
+  const key = $("disp-wl-phase")?.value || "";
+  const chosen = key ? disperseWlPhases.filter((p) => p.stageKey === key) : disperseWlPhases;
+  const out = new Set();
+  for (const p of chosen) for (const a of p.addresses) out.add(String(a).toLowerCase());
+  return out;
+}
+
+/**
+ * Tick exactly the eligible wallets and untick the rest.
+ *
+ * Unticking matters as much as ticking: the list starts with everything
+ * selected, so only adding would fund all of them and say nothing about it.
+ */
+function applyDisperseWl() {
+  disperseWlSet = disperseWlAddresses();
+  const from = ($("disp-from")?.value || "").toLowerCase();
+  // Redraw first, tick second. The renderer re-checks everything when it finds
+  // no prior selection, so ticking first would turn "nothing matched" into
+  // "fund all of them" — the exact mistake this control exists to prevent.
+  renderDisperseToList();
+  let hit = 0;
+  for (const cb of document.querySelectorAll(".disp-to-cb")) {
+    const on = disperseWlSet.has(String(cb.value).toLowerCase());
+    cb.checked = on;
+    if (on) hit++;
+  }
+  if ($("disp-to-all")) $("disp-to-all").checked = false;
+  const out = $("disp-wl-out");
+  if (out) {
+    const missing = disperseWlSet.size - hit - (disperseWlSet.has(from) ? 1 : 0);
+    // A wallet on the list but not in the vault is worth saying out loud: it
+    // will silently go unfunded otherwise.
+    out.textContent =
+      `${hit}/${disperseWlSet.size}` + (missing > 0 ? ` · ${missing} не в сейфе` : "");
+  }
+  updateDisperseSummary();
+}
+
+$("btn-disp-wl")?.addEventListener("click", async () => {
+  const slug = ($("disp-wl-slug")?.value || "").trim();
+  const out = $("disp-wl-out");
+  const sel = $("disp-wl-phase");
+  if (!slug) {
+    if (out) out.textContent = t("disperse.wlNone") || "";
+    return;
+  }
+  if (out) out.textContent = "…";
+  try {
+    const phases = await invoke("load_wl_for_slug", { slug });
+    disperseWlPhases = Array.isArray(phases) && phases.length ? phases : null;
+    if (!disperseWlPhases) {
+      disperseWlSet = null;
+      sel?.classList.add("hidden");
+      if (out) out.textContent = t("disperse.wlNone") || "no saved check";
+      renderDisperseToList();
+      return;
+    }
+    // One phase needs no chooser; several do, because a wallet allowed in one
+    // phase is not allowed in the next.
+    if (sel) {
+      sel.innerHTML =
+        `<option value="">${escapeHtml(t("disperse.wlAllPhases") || "all phases")}</option>` +
+        disperseWlPhases
+          .map(
+            (p) =>
+              `<option value="${escapeHtml(p.stageKey)}">${escapeHtml(p.stageKey)} (${p.addresses.length})</option>`
+          )
+          .join("");
+      sel.classList.toggle("hidden", disperseWlPhases.length < 2);
+    }
+    applyDisperseWl();
+  } catch (e) {
+    if (out) out.textContent = String(e);
+  }
+});
+
+$("disp-wl-phase")?.addEventListener("change", applyDisperseWl);
 
 $("disp-from")?.addEventListener("change", () => {
   renderDisperseToList();
@@ -4196,7 +4325,10 @@ $("disp-to-list")?.addEventListener("change", (e) => {
 
 $("disp-amount")?.addEventListener("input", updateDisperseSummary);
 // Network/source also drive the step rail and the balance check.
-$("disp-chain")?.addEventListener("change", updateDisperseSummary);
+$("disp-chain")?.addEventListener("change", () => {
+  refreshDisperseFee();
+  updateDisperseSummary();
+});
 
 $("btn-disperse")?.addEventListener("click", async () => {
   const chain = ($("disp-chain")?.value || "").trim();
@@ -7167,6 +7299,18 @@ async function checkForUpdate() {
     .replace("{latest}", info.latest)
     .replace("{current}", info.current);
   if (info.url) link.href = info.url;
+  // Two different jobs behind one banner: unzip in place, or re-run the
+  // installer. Saying the wrong one sends the operator looking for a folder
+  // that does not exist on their machine.
+  const hint = $("update-hint");
+  if (hint) {
+    hint.textContent =
+      info.windows === false
+        ? t("update.reinstall") ||
+          "Re-run the installer — your data stays in /var/lib/minter."
+        : t("update.keepFolder") ||
+          "Unzip it over your current folder — your keys and settings live there.";
+  }
   banner.classList.remove("hidden");
 
   $("update-dismiss")?.addEventListener(

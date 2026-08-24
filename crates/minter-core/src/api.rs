@@ -327,6 +327,16 @@ pub struct ProxyListItem {
     pub label: String,
 }
 
+/// One transfer's cost on a chain, as strings because wei does not fit a JS number.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferFeeEstimate {
+    pub per_tx_wei: String,
+    pub gas_limit: u64,
+    pub max_fee_wei: String,
+    pub chain_id: u64,
+}
+
 impl Session {
     pub fn new(vault_path: impl Into<PathBuf>, env_path: impl Into<PathBuf>) -> Self {
         let env_path = env_path.into();
@@ -2404,6 +2414,39 @@ impl Session {
     pub async fn measure_fire_lag(&self, chain: &str) -> Result<crate::timing::FireLagReport> {
         let rpc = self.rpc_client_for_chain(chain)?;
         crate::timing::measure_fire_lag(&rpc).await
+    }
+
+    /// What one plain transfer actually costs on this chain, in wei.
+    ///
+    /// The disperse screen priced every transfer at 21 000 gas × 30 gwei, which
+    /// are mainnet numbers. On the L2s these runs actually use, gas is a
+    /// thousandth of that, so the line overstated the cost by orders of
+    /// magnitude — and, worse, coloured a well-funded wallet as short. One call
+    /// to the chain replaces the guess.
+    ///
+    /// The gas limit comes from the same floor the engine applies, and the OP
+    /// chains' separate L1 data fee is included, so the figure is the one a run
+    /// would really reserve.
+    pub async fn transfer_fee_wei(&self, chain: &str) -> Result<TransferFeeEstimate> {
+        let rpc = self.rpc_client_for_chain(chain)?;
+        let chain_id = rpc.chain_id().await.unwrap_or(0);
+        let (base_fee, priority) = rpc.fee_history().await?;
+        // Twice the base plus the tip: the shape the engine's hybrid mode uses,
+        // so the estimate and the run cannot disagree about headroom.
+        let max_fee = base_fee
+            .saturating_mul(alloy_primitives::U256::from(2u64))
+            .saturating_add(priority);
+        let gas_limit = crate::gas::apply_gas_limit(21_000, 1.0, chain_id, 0);
+        let l1 = crate::gas::estimate_l1_data_fee(&rpc, chain_id).await;
+        let per_tx = max_fee
+            .saturating_mul(alloy_primitives::U256::from(gas_limit))
+            .saturating_add(l1);
+        Ok(TransferFeeEstimate {
+            per_tx_wei: per_tx.to_string(),
+            gas_limit,
+            max_fee_wei: max_fee.to_string(),
+            chain_id,
+        })
     }
 
     pub async fn raw_sniper(

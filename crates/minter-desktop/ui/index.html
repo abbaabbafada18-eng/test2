@@ -127,7 +127,7 @@
         <div id="update-banner" class="update-banner hidden" role="status">
           <span id="update-text"></span>
           <a id="update-link" href="#" target="_blank" rel="noopener" data-i18n="update.open">Open Releases</a>
-          <span class="muted small" data-i18n="update.keepFolder">Unzip it over your current folder — your keys and settings live there.</span>
+          <span id="update-hint" class="muted small"></span>
           <button type="button" id="update-dismiss" class="update-dismiss" aria-label="Dismiss">&times;</button>
         </div>
         <div id="toast-host" class="toast-host" aria-live="polite"></div>
@@ -529,6 +529,10 @@
                   <div class="wallet-pick-head">
                     <span><span data-i18n="disperse.to">To wallets</span> <span id="disp-to-count" class="pick-count"></span></span>
                     <label class="check tight"><input type="checkbox" id="disp-to-all" checked /> <span data-i18n="tasks.selectAll">Select all</span></label>
+                    <input type="text" id="disp-wl-slug" class="tight-num" style="width:150px" placeholder="collection / URL" autocomplete="off" />
+                    <select id="disp-wl-phase" class="tight-num hidden"></select>
+                    <button type="button" id="btn-disp-wl" class="ghost-btn tight-btn" data-i18n="disperse.wlPick">WL only</button>
+                    <span id="disp-wl-out" class="muted"></span>
                   </div>
                   <div id="disp-to-list" class="task-wallet-list muted">Unlock vault to load wallets…</div>
                 </div>

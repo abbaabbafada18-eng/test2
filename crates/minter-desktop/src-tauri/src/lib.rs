@@ -842,6 +842,26 @@ async fn wallet_balances(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct TransferFeeInput {
+    chain: String,
+}
+
+/// What one transfer costs on a chain, for the disperse estimate line.
+#[tauri::command]
+async fn transfer_fee(
+    state: State<'_, Arc<AppState>>,
+    input: TransferFeeInput,
+) -> Result<minter_core::TransferFeeEstimate, String> {
+    let _slot = net_slot(&state).await?;
+    let session = state.session.lock().clone();
+    session
+        .transfer_fee_wei(&input.chain)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ProbeNetworksInput {
     /// Chain names e.g. ethereum, base, polygon. Empty → common set.
     chains: Option<Vec<String>>,
@@ -1659,9 +1679,25 @@ fn mint_running(state: State<'_, Arc<AppState>>) -> bool {
 /// or installs anything, and it sends nothing about the operator. Any failure
 /// (offline, rate limited) comes back as "no update known" with a note rather
 /// than an error the operator has to dismiss.
+/// The check plus the one thing the operator has to know to act on it.
+///
+/// Updating is not the same job on both platforms — Windows unzips over its own
+/// folder, the Linux service re-runs the installer and keeps its data in
+/// `/var/lib/minter` — and the banner has to say the right one. The binary knows
+/// which it is; the page cannot.
+#[derive(serde::Serialize)]
+struct UpdateView {
+    #[serde(flatten)]
+    info: minter_core::update::UpdateInfo,
+    windows: bool,
+}
+
 #[tauri::command]
-async fn check_for_update() -> Result<minter_core::update::UpdateInfo, String> {
-    Ok(minter_core::update::check_for_update(minter_core::update::DEFAULT_REPO).await)
+async fn check_for_update() -> Result<UpdateView, String> {
+    Ok(UpdateView {
+        info: minter_core::update::check_for_update(minter_core::update::DEFAULT_REPO).await,
+        windows: cfg!(target_os = "windows"),
+    })
 }
 
 #[tauri::command]
@@ -2568,6 +2604,7 @@ pub fn run() {
             probe_networks,
             warm_rpc_latency,
             measure_fire_lag,
+            transfer_fee,
             load_wallet_meta,
             save_wallet_meta,
             pick_files,

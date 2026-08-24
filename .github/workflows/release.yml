@@ -182,7 +182,7 @@ jobs:
 
             No server needed. Your machine has to be awake at mint time.
 
-            ### Updating from an earlier version
+            ### Updating — Windows
             Unzip **over your existing folder**, replacing `minter-desktop.exe`.
 
             Your wallets and settings live in that folder — `keys.vault`,
@@ -190,6 +190,14 @@ jobs:
             only the program and its documentation, so nothing of yours is
             touched. Unzipping somewhere new gives you a second, empty install
             while everything stays behind in the old folder.
+
+            ### Updating — Linux VPS
+            Nothing to unzip: re-run the installer below. It upgrades in place,
+            keeps the previous binary under `/opt/minter/backups/`, and refuses
+            to replace a build while a mint looks active.
+
+            Your data never lived beside the binary — it stays in
+            `/var/lib/minter`, untouched.
 
             ### Linux VPS — run it 24/7 near the chain
             On a fresh Linux server — Ubuntu, Debian, Fedora, RHEL or Arch, no desktop required:

@@ -135,6 +135,7 @@ macro_rules! rprint {
         }
     }};
 }
+pub use api::TransferFeeEstimate;
 pub use batch::{
     BatchCancel, BatchEvent, BatchReporter, DEFAULT_BATCH_CONCURRENCY, MAX_BATCH_CONCURRENCY,
     NullBatchReporter, resolve_concurrency,
