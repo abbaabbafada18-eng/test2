@@ -20,7 +20,11 @@
 set -Eeuo pipefail
 
 REPO="${MINTER_REPO:-MaxBetov-pdd/Minter-rs-v2}"
-VERSION="${MINTER_VERSION:-latest}"
+# Named for this script rather than `VERSION`: sourcing /etc/os-release below
+# defines VERSION as the distribution's own — "24.04.4 LTS (Noble Numbat)" on
+# Ubuntu — and the release URL built from it is not a URL at all. Every install
+# on a distro that sets it died at "cannot reach the GitHub release API".
+WANT_RELEASE="${MINTER_VERSION:-latest}"
 INSTALL_DIR="/opt/minter"
 DATA_DIR="/var/lib/minter"
 SERVICE="minter-vps"
@@ -142,9 +146,9 @@ esac
 ok "packages installed"
 
 # ── Download the release ─────────────────────────────────────────────────────
-say "Fetching MINTER ($VERSION) from $REPO"
+say "Fetching MINTER ($WANT_RELEASE) from $REPO"
 api="https://api.github.com/repos/$REPO/releases/latest"
-[ "$VERSION" = "latest" ] || api="https://api.github.com/repos/$REPO/releases/tags/$VERSION"
+[ "$WANT_RELEASE" = "latest" ] || api="https://api.github.com/repos/$REPO/releases/tags/$WANT_RELEASE"
 
 meta="$(curl -fsSL "$api")" || die "cannot reach the GitHub release API"
 tag="$(printf '%s' "$meta" | jq -r '.tag_name // empty')"
