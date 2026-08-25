@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-08-25
+
+### Fixed
+
+- Ink was missing from the network list on the RPC screen, so the one chain
+  these runs are currently on could not be pinged. It is there now, and on by
+  default; a saved selection is untouched.
+
+- Ink was missing from the NFT host map the sweep uses, which left an Alchemy
+  key unable to list what a wallet holds on that chain.
+
+  Both are hand-kept lists that sit apart from the chain registry, which is why
+  adding a network in nine places still left two behind.
+
 ## [1.1.0] - 2026-08-24
 
 ### Changed
@@ -289,7 +303,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Session / vault Debug redaction
 - Wave A–D hardening (LIVE gate, fee caps, zero-address rejects, OpenSea value checks, etc.)
 
-[Unreleased]: https://github.com/MaxBetov-pdd/Minter-rs-v2/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/MaxBetov-pdd/Minter-rs-v2/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/MaxBetov-pdd/Minter-rs-v2/releases/tag/v1.1.1
 [1.1.0]: https://github.com/MaxBetov-pdd/Minter-rs-v2/releases/tag/v1.1.0
 [1.0.2]: https://github.com/MaxBetov-pdd/Minter-rs-v2/releases/tag/v1.0.2
 [1.0.1]: https://github.com/MaxBetov-pdd/Minter-rs-v2/releases/tag/v1.0.1
