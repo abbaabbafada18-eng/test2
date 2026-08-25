@@ -58,6 +58,7 @@ fn alchemy_nft_domain(chain_id: u64) -> Option<&'static str> {
         42161 => Some("arb-mainnet.g.alchemy.com"),
         10 => Some("opt-mainnet.g.alchemy.com"),
         4663 => Some("robinhood-mainnet.g.alchemy.com"),
+        57073 => Some("ink-mainnet.g.alchemy.com"),
         _ => None,
     }
 }
