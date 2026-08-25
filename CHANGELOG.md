@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-08-25
+
+### Fixed
+
+- The Linux installer could not fetch a release on Ubuntu or Debian. It kept
+  the wanted version in a variable named `VERSION`, and then sourced
+  `/etc/os-release` to identify the distribution — which defines `VERSION` as
+  its own, `24.04.4 LTS (Noble Numbat)`. The release URL was built from that and
+  was not a URL at all, so every install died at "cannot reach the GitHub
+  release API". The command in these very release notes therefore did not work
+  on the two distributions most people use. The variable is now named for this
+  script, with a note saying why it cannot be shortened back.
+
+- Ink was missing from the network list on the balances screen — the last of the
+  hand-kept lists, after the RPC picker and the sweep's NFT hosts. Every chain
+  dropdown in the app now carries it.
+
 ## [1.1.1] - 2026-08-25
 
 ### Fixed
@@ -303,7 +320,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Session / vault Debug redaction
 - Wave A–D hardening (LIVE gate, fee caps, zero-address rejects, OpenSea value checks, etc.)
 
-[Unreleased]: https://github.com/MaxBetov-pdd/Minter-rs-v2/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/MaxBetov-pdd/Minter-rs-v2/compare/v1.1.2...HEAD
+[1.1.2]: https://github.com/MaxBetov-pdd/Minter-rs-v2/releases/tag/v1.1.2
 [1.1.1]: https://github.com/MaxBetov-pdd/Minter-rs-v2/releases/tag/v1.1.1
 [1.1.0]: https://github.com/MaxBetov-pdd/Minter-rs-v2/releases/tag/v1.1.0
 [1.0.2]: https://github.com/MaxBetov-pdd/Minter-rs-v2/releases/tag/v1.0.2
