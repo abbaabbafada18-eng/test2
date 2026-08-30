@@ -816,6 +816,7 @@ impl Session {
                 "arbitrum".into(),
                 "optimism".into(),
                 "robinhood".into(),
+                "hyperevm".into(),
             ],
         };
         let proxy_url = if via_proxy {
@@ -944,6 +945,7 @@ impl Session {
                 "arbitrum".into(),
                 "optimism".into(),
                 "robinhood".into(),
+                "hyperevm".into(),
             ],
         };
         let proxy_url = if via_proxy {
@@ -3631,6 +3633,7 @@ fn chain_id_label(id: u64) -> String {
         143 => "Monad".into(),
         4326 => "MegaETH".into(),
         4663 => "Robinhood Chain".into(),
+        999 => "HyperEVM".into(),
         0 => "Not selected".into(),
         other => format!("chainId {other}"),
     }
@@ -3817,6 +3820,8 @@ fn provider_chain_slugs(
         "robinhood" | "robinhood_chain" | "robinhood-chain" => {
             (Some("robinhood-mainnet"), None, None)
         }
+        // HyperEVM (Hyperliquid) — no Alchemy support; served by its public RPC.
+        "hyperevm" | "hyperliquid" | "hyper_evm" => (None, None, None),
         "shape" => (Some("shape-mainnet"), None, None),
         "ink" => (Some("ink-mainnet"), None, None),
         _ => (None, None, None),
@@ -3856,6 +3861,10 @@ fn public_rpc_fallback(chain: &str) -> Vec<&'static str> {
         "robinhood" | "robinhood_chain" | "robinhood-chain" => {
             vec!["https://rpc.mainnet.chain.robinhood.com"]
         }
+        "hyperevm" | "hyperliquid" | "hyper_evm" => vec![
+            "https://rpc.hyperliquid.xyz/evm",
+            "https://hyperliquid-rpc.publicnode.com",
+        ],
         "shape" => vec!["https://mainnet.shape.network"],
         "ink" => vec![
             "https://rpc-gel.inkonchain.com",

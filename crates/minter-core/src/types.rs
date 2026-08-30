@@ -37,6 +37,9 @@ pub fn chain_id_map() -> HashMap<&'static str, u64> {
     m.insert("robinhood", 4663);
     m.insert("robinhood_chain", 4663);
     m.insert("robinhood-chain", 4663);
+    m.insert("hyperevm", 999);
+    m.insert("hyperliquid", 999);
+    m.insert("hyper_evm", 999);
     m
 }
 
@@ -58,6 +61,7 @@ pub enum ChainId {
     Monad = 143,
     MegaEth = 4326,
     Robinhood = 4663,
+    HyperEvm = 999,
 }
 
 impl ChainId {
@@ -79,6 +83,7 @@ impl ChainId {
             143 => Some(Self::Monad),
             4326 => Some(Self::MegaEth),
             4663 => Some(Self::Robinhood),
+            999 => Some(Self::HyperEvm),
             _ => None,
         }
     }
@@ -105,6 +110,7 @@ impl ChainId {
             Self::Monad => "monad",
             Self::MegaEth => "megaeth",
             Self::Robinhood => "robinhood",
+            Self::HyperEvm => "hyperevm",
         }
     }
 
@@ -126,6 +132,7 @@ impl ChainId {
             Self::Monad,
             Self::MegaEth,
             Self::Robinhood,
+            Self::HyperEvm,
         ]
     }
 }
@@ -169,6 +176,16 @@ mod chain_id_tests {
         assert_eq!(chain_id_map().get("robinhood"), Some(&4663));
         assert_eq!(chain_id_map().get("robinhood_chain"), Some(&4663));
         assert!(ChainId::all().contains(&ChainId::Robinhood));
+    }
+
+    #[test]
+    fn hyperevm_chain() {
+        assert_eq!(ChainId::from_id(999), Some(ChainId::HyperEvm));
+        assert_eq!(ChainId::HyperEvm.id(), 999);
+        assert_eq!(ChainId::HyperEvm.name(), "hyperevm");
+        assert_eq!(chain_id_map().get("hyperevm"), Some(&999));
+        assert_eq!(chain_id_map().get("hyperliquid"), Some(&999));
+        assert!(ChainId::all().contains(&ChainId::HyperEvm));
     }
 }
 

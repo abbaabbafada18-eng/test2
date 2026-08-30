@@ -655,16 +655,41 @@ pub async fn run_raw_mint(
                     h
                 }
                 Err(e) => {
-                    crate::rlog!(" FAILED: {}", e);
-                    results.push(MintResult {
-                        address: addr,
-                        tx_hash: None,
-                        status: WalletStatus::Failed,
-                        gas_used: None,
-                        block_number: None,
-                        error: Some(format!("send: {e}")),
-                    });
-                    continue;
+                    // A send error is NOT proof the tx never entered a pool — with
+                    // one endpoint a lost response/timeout looks identical to a
+                    // rejection, and "already known" errors on a live tx. Only
+                    // provably-rejected errors are a real failure; anything
+                    // ambiguous keeps its precomputed hash and is reconciled
+                    // against the chain below (the sniper path guards this the same
+                    // way). Reporting Failed with no hash would discard the one
+                    // thing needed to verify → a mined mint reported as a loss and
+                    // a double mint on retry.
+                    match crate::errors::classify_send_failure(&e.to_string()) {
+                        crate::errors::SendOutcome::Rejected => {
+                            crate::rlog!(" REJECTED: {}", e);
+                            results.push(MintResult {
+                                address: addr,
+                                tx_hash: None,
+                                status: WalletStatus::Failed,
+                                gas_used: None,
+                                block_number: None,
+                                error: Some(format!("send: {e}")),
+                            });
+                            continue;
+                        }
+                        // Accepted (node already has it) OR Ambiguous (unclear):
+                        // the tx may well be live, so keep its precomputed hash and
+                        // reconcile against the chain instead of calling it a loss.
+                        crate::errors::SendOutcome::Accepted
+                        | crate::errors::SendOutcome::Ambiguous => {
+                            crate::rlog!(
+                                " send unconfirmed ({}) — verifying {}",
+                                e,
+                                shorten_hash(&piece.tx_hash)
+                            );
+                            piece.tx_hash
+                        }
+                    }
                 }
             };
             crate::rprint!("  Receipt...");

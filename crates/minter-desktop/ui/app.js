@@ -291,6 +291,9 @@ function explorerTxUrlLocal(chain, txHash) {
     robinhood: "https://robinhoodchain.blockscout.com/tx/",
     "robinhood_chain": "https://robinhoodchain.blockscout.com/tx/",
     "4663": "https://robinhoodchain.blockscout.com/tx/",
+    hyperevm: "https://hyperevmscan.io/tx/",
+    hyperliquid: "https://hyperevmscan.io/tx/",
+    "999": "https://hyperevmscan.io/tx/",
     apechain: "https://apescan.io/tx/",
     "33139": "https://apescan.io/tx/",
     shape: "https://shapescan.xyz/tx/",
@@ -1727,7 +1730,7 @@ const RPC_CHAIN_COLORS = {
   ethereum: "#627eea", base: "#0052ff", polygon: "#8247e5", arbitrum: "#28a0f0",
   optimism: "#ff0420", robinhood: "#00c805", blast: "#f5c84c", zora: "#9aa3b5",
   apechain: "#0054fa", shape: "#2ee6c7", ink: "#7132f5", monad: "#8b7bff", megaeth: "#5b8def",
-  bsc: "#f0b90b", avalanche: "#e84142",
+  bsc: "#f0b90b", avalanche: "#e84142", hyperevm: "#97fce4",
 };
 function rpcChainColor(name) {
   return RPC_CHAIN_COLORS[String(name || "").toLowerCase()] || "var(--muted-2)";

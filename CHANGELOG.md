@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-30
+
+### Added
+
+- HyperEVM (Hyperliquid, chainId 999) is now a first-class chain. It resolves by
+  name, ships a public RPC fallback (`rpc.hyperliquid.xyz/evm`), carries its label,
+  explorer link and colour, and appears in every chain dropdown — so a mint on
+  Hyperliquid needs no manual RPC entry.
+
+### Fixed
+
+- A transaction-receipt lookup returned "no receipt" the moment the first RPC node
+  answered `null`, even if that node was merely lagging while another already had
+  the receipt. A lookup mistaken for a definite absence is how a double mint
+  happens: the lookup now trusts any node that has the receipt, reports absence
+  only when every node positively answers `null`, and surfaces an error (Unknown,
+  not "absent") if any node failed.
+
+- The public (non-Flashbots) live send treated every send error as a lost mint and
+  threw away the signed hash — but with a single endpoint a lost response or an
+  "already known" reply looks identical to a rejection. Only a provably-rejected
+  error is a failure now; anything ambiguous keeps its precomputed hash and is
+  reconciled against the chain, the same guard the sniper path already carried.
+
+- Cancelling the sniper's early-push window marked every wallet failed, including
+  those whose transaction had already been accepted into the mempool, discarding
+  their hashes and reporting live mints as losses. Cancellation now keeps an
+  accepted wallet as sent (carrying its hash) and fails only those never accepted.
+
 ## [1.1.2] - 2026-08-25
 
 ### Fixed
@@ -320,7 +349,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Session / vault Debug redaction
 - Wave A–D hardening (LIVE gate, fee caps, zero-address rejects, OpenSea value checks, etc.)
 
-[Unreleased]: https://github.com/MaxBetov-pdd/Minter-rs-v2/compare/v1.1.2...HEAD
+[Unreleased]: https://github.com/MaxBetov-pdd/Minter-rs-v2/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/MaxBetov-pdd/Minter-rs-v2/releases/tag/v1.2.0
 [1.1.2]: https://github.com/MaxBetov-pdd/Minter-rs-v2/releases/tag/v1.1.2
 [1.1.1]: https://github.com/MaxBetov-pdd/Minter-rs-v2/releases/tag/v1.1.1
 [1.1.0]: https://github.com/MaxBetov-pdd/Minter-rs-v2/releases/tag/v1.1.0

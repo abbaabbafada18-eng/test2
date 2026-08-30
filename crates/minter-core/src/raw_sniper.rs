@@ -1135,7 +1135,33 @@ pub async fn run_raw_sniper(
                 }
             }
             if cancelled(&cancel) {
-                return fail_all(signers, "cancelled by user");
+                // Do NOT blanket fail_all: wallets whose tx was already accepted
+                // into the mempool (early_hash set) are live and will very likely
+                // mine. Discarding their hashes here would report confirmed/pending
+                // mints as losses and lose the hash needed to verify — risking a
+                // double mint on a manual retry. Keep the accepted ones as Sent
+                // (carrying the hash); fail only those never accepted.
+                return prepared
+                    .iter()
+                    .map(|p| match p.early_hash {
+                        Some(hash) => MintResult {
+                            address: p.address,
+                            tx_hash: Some(hash),
+                            status: WalletStatus::Sent,
+                            gas_used: None,
+                            block_number: None,
+                            error: None,
+                        },
+                        None => MintResult {
+                            address: p.address,
+                            tx_hash: None,
+                            status: WalletStatus::Failed,
+                            gas_used: None,
+                            block_number: None,
+                            error: Some("cancelled by user".into()),
+                        },
+                    })
+                    .collect();
             }
             if let Some(msg) = broken.filter(|_| accepted == 0) {
                 report(

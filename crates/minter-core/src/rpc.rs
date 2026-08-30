@@ -914,14 +914,18 @@ impl RpcClient {
                 .await
             {
                 Ok(result) => {
-                    if attempt > 0 {
-                        crate::rlog!("RPC receipt OK via {}", Self::short_url(url));
+                    if !result.is_null() {
+                        if attempt > 0 {
+                            crate::rlog!("RPC receipt OK via {}", Self::short_url(url));
+                        }
+                        // Any node that has the receipt is authoritative.
+                        return Ok(Some(result));
                     }
-                    return if result.is_null() {
-                        Ok(None)
-                    } else {
-                        Ok(Some(result))
-                    };
+                    // A single node's `null` is NOT authoritative — it may just be
+                    // lagging behind. Keep asking the rest before concluding the
+                    // tx is absent. Treating a lagging/partial lookup as
+                    // "not found" is exactly how a double mint happens (see
+                    // find_landed's contract below).
                 }
                 Err(e) => {
                     crate::rlog!("RPC receipt failed via {}: {}", Self::short_url(url), e);
@@ -930,10 +934,14 @@ impl RpcClient {
                 }
             }
         }
-        bail!(
-            "All RPC receipt attempts failed: {}",
-            last_error.map(|e| e.to_string()).unwrap_or_default()
-        )
+        // No node had the receipt. Only report "absent" (`Ok(None)`) when EVERY
+        // queried node positively answered `null`. If any node errored, the
+        // lookup is incomplete → surface the error so the caller treats it as
+        // Unknown, never as a definite absence.
+        match last_error {
+            Some(e) => bail!("RPC receipt lookup incomplete (a node failed): {}", e),
+            None => Ok(None),
+        }
     }
 
     pub async fn wait_for_receipt(
