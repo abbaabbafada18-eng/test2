@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-08-31
+
+### Fixed
+
+- HyperEVM is now truly wired into *every* chain surface. 1.2.0 added it to the
+  dropdowns but missed two spots: the transaction-explorer resolver (a HyperEVM
+  mint's tx now links to `hyperevmscan.io` instead of falling back to Etherscan)
+  and the RPC health panel (HyperEVM now has its own checkbox alongside the other
+  chains). No behaviour change for other chains.
+
 ## [1.2.0] - 2026-08-30
 
 ### Added
@@ -349,7 +359,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Session / vault Debug redaction
 - Wave A–D hardening (LIVE gate, fee caps, zero-address rejects, OpenSea value checks, etc.)
 
-[Unreleased]: https://github.com/MaxBetov-pdd/Minter-rs-v2/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/MaxBetov-pdd/Minter-rs-v2/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/MaxBetov-pdd/Minter-rs-v2/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/MaxBetov-pdd/Minter-rs-v2/releases/tag/v1.2.0
 [1.1.2]: https://github.com/MaxBetov-pdd/Minter-rs-v2/releases/tag/v1.1.2
 [1.1.1]: https://github.com/MaxBetov-pdd/Minter-rs-v2/releases/tag/v1.1.1

@@ -104,6 +104,7 @@ pub fn explorer_tx_url(chain: &str, tx_hash: &str) -> String {
         "robinhood" | "robinhood_chain" | "robinhood-chain" | "4663" => {
             "https://robinhoodchain.blockscout.com/tx/"
         }
+        "hyperevm" | "hyperliquid" | "hyper_evm" | "999" => "https://hyperevmscan.io/tx/",
         _ => "https://etherscan.io/tx/",
     };
     format!("{base}{h}")
