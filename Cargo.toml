@@ -10,3 +10,10 @@ default-members = ["crates/minter-desktop/src-tauri"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/MaxBetov-pdd/Minter-rs-v2"
 authors = ["Andark <andarx4nok@gmail.com>"]
+
+# Shipping build: one codegen unit + thin LTO lets the optimizer inline across
+# crates (signing, JSON, hashing on the mint path). Unwinding stays on — the
+# desktop's MintBusyGuard relies on it, so no `panic = "abort"`.
+[profile.release]
+codegen-units = 1
+lto = "thin"

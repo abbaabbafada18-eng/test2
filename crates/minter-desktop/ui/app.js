@@ -931,6 +931,8 @@ $("lang-chip")?.addEventListener("click", () => {
     title.textContent = t("page." + active.dataset.page);
   }
   renderWalletsVirtual();
+  renderGroupControls();
+  if (wlWalletCache.length) renderWlWalletList();
   scheduleMintTableRender();
   if (tasksLoaded) renderTaskList();
 });
@@ -939,8 +941,20 @@ $("lang-chip")?.addEventListener("click", () => {
 // chip was removed because it reported a session mode the tools never read.
 
 // —— Wallets (virtualized) + groups / proxy map / balances / import ——
-/** address(lower) → group A/B/C */
+/** address(lower) → group name (missing = no group) */
 let walletGroups = {};
+/** Group names in display order, kept even while a group has no wallets. */
+let walletGroupList = [];
+/** Groups hidden from the wallet lists; NO_GROUP stands for ungrouped wallets. */
+let hiddenWalletGroups = new Set();
+/** Session-only: reveal hidden groups in the Wallets table. */
+let walletShowHidden = false;
+const NO_GROUP = "";
+/** Filter key for ungrouped wallets — reserved, so never a group name. */
+const NO_GROUP_FILTER = "__none__";
+/** Filter keywords share a namespace with group names. */
+const RESERVED_GROUP_NAMES = new Set(["all", "funded", NO_GROUP_FILTER]);
+const MAX_GROUP_NAME = 24;
 /** address(lower) → proxy route: -1 = direct, >=0 = proxy index; missing = auto */
 let walletProxyMap = {};
 const DIRECT_PROXY_ROUTE = -1;
@@ -980,6 +994,13 @@ async function loadWalletMeta() {
     const g = {};
     for (const [k, v] of Object.entries(walletGroups)) g[addrKey(k)] = v;
     walletGroups = g;
+    walletGroupList = (Array.isArray(f.groupList) ? f.groupList : [])
+      .map((x) => String(x ?? "").trim())
+      .filter(Boolean);
+    hiddenWalletGroups = new Set(
+      (Array.isArray(f.hiddenGroups) ? f.hiddenGroups : []).map((x) => String(x ?? "").trim())
+    );
+    syncWalletGroupList();
     const p = {};
     for (const [k, v] of Object.entries(walletProxyMap)) {
       const route = Number(v);
@@ -996,8 +1017,10 @@ async function loadWalletMeta() {
 async function saveWalletMeta() {
   await invoke("save_wallet_meta", {
     file: {
-      version: 3,
+      version: 4,
       groups: walletGroups,
+      groupList: walletGroupList,
+      hiddenGroups: [...hiddenWalletGroups],
       proxyMap: walletProxyMap,
       selectedAddresses: [...walletSelection],
       sweepDestination,
@@ -1007,24 +1030,31 @@ async function saveWalletMeta() {
 }
 
 function walletGroupOf(address) {
-  return walletGroups[addrKey(address)] || "";
+  return walletGroups[addrKey(address)] || NO_GROUP;
 }
 
 /**
- * Group names currently assigned to at least one wallet, sorted.
+ * Make sure every group that has wallets is listed, keeping display order.
  *
- * Groups used to be the fixed set A/B/C baked into the markup. They are now
- * free-form strings, so every chip row is generated from whatever the operator
- * has actually created — existing A/B/C data keeps working unchanged, since it
- * was always stored as a plain string.
+ * Older wallet_meta.json files only stored assignments (a group existed only
+ * while it had wallets), so assigned names missing from the list are appended
+ * sorted instead of being dropped. Legacy A/B/C data keeps working unchanged.
  */
-function allWalletGroups() {
+function syncWalletGroupList() {
   const seen = new Set();
+  const out = [];
+  for (const g of walletGroupList) {
+    if (g && !seen.has(g)) {
+      seen.add(g);
+      out.push(g);
+    }
+  }
+  const extra = new Set();
   for (const v of Object.values(walletGroups)) {
     const g = String(v || "").trim();
-    if (g) seen.add(g);
+    if (g && !seen.has(g)) extra.add(g);
   }
-  return [...seen].sort((a, b) => a.localeCompare(b));
+  walletGroupList = out.concat([...extra].sort((a, b) => a.localeCompare(b)));
 }
 
 /** Stable colour for a group name — free-form names cannot use fixed classes. */
@@ -1035,36 +1065,216 @@ function groupColor(name) {
   return `hsl(${h % 360} 62% 42%)`;
 }
 
-/** Repaint every group-driven control: assign buttons, both filter rows. */
-function renderGroupControls() {
-  const groups = allWalletGroups();
+function normalizeGroupName(raw) {
+  // Group names end up in file-backed metadata and in chip labels; keep them
+  // short and free of the separators the rest of the UI splits on.
+  return String(raw ?? "")
+    .trim()
+    .replace(/[,\s]+/g, "-")
+    .slice(0, MAX_GROUP_NAME);
+}
 
-  const assign = $("wallet-group-chips");
-  if (assign) {
-    assign.innerHTML = groups
-      .map(
-        (g) =>
-          `<button type="button" class="btn-group" data-group="${escapeHtml(g)}" ` +
-          `style="--g:${groupColor(g)}" title="${escapeHtml(g)}">${escapeHtml(g)}</button>`
-      )
-      .join("");
+/** Validation message for a proposed group name, or "" when it is usable. */
+function groupNameError(name, original = null) {
+  if (!name) return t("wallets.groups.errEmpty");
+  if (RESERVED_GROUP_NAMES.has(name.toLowerCase())) return t("wallets.groups.errReserved");
+  if (name !== original && walletGroupList.includes(name)) return t("wallets.groups.errExists");
+  return "";
+}
+
+function groupLabel(g) {
+  return g === NO_GROUP ? t("wallets.groups.none") : g;
+}
+
+function groupFilterKey(g) {
+  return g === NO_GROUP ? NO_GROUP_FILTER : g;
+}
+
+/** group → number of vault wallets in it (NO_GROUP included). */
+function walletGroupCounts() {
+  const counts = new Map();
+  for (const w of walletData) {
+    const g = walletGroupOf(w.address);
+    counts.set(g, (counts.get(g) || 0) + 1);
   }
+  return counts;
+}
 
+function hiddenWalletCount() {
+  let n = 0;
+  for (const w of walletData) if (hiddenWalletGroups.has(walletGroupOf(w.address))) n++;
+  return n;
+}
+
+/**
+ * True when a Wallets-table row is suppressed only because its group is
+ * hidden. An explicit filter on that group, a search or "show hidden" reveal it.
+ */
+function walletHiddenNow(w) {
+  if (walletShowHidden || walletQuery.trim()) return false;
+  const g = walletGroupOf(w.address);
+  return hiddenWalletGroups.has(g) && walletFilter !== groupFilterKey(g);
+}
+
+/** Repaint every group-driven control. */
+function renderGroupControls() {
+  syncWalletGroupList();
+  renderWalletFilterChips();
+  renderWalletGroupsPanel();
+  renderWalletBulkGroupSelect();
+  renderWalletHiddenHint();
+  renderTaskGroupChips();
+}
+
+function renderWalletFilterChips() {
+  // A filter on a deleted or renamed group would show an empty table forever.
+  if (
+    walletFilter !== "all" &&
+    walletFilter !== "funded" &&
+    walletFilter !== NO_GROUP_FILTER &&
+    !walletGroupList.includes(walletFilter)
+  ) {
+    walletFilter = "all";
+  }
+  const counts = walletGroupCounts();
   const filters = $("wallet-filter-groups");
   if (filters) {
-    filters.innerHTML = groups
+    const chips = walletGroupList.map((g) => ({
+      key: g,
+      label: g,
+      hidden: hiddenWalletGroups.has(g),
+    }));
+    if (walletGroupList.length && (counts.get(NO_GROUP) || 0) > 0) {
+      chips.push({
+        key: NO_GROUP_FILTER,
+        label: groupLabel(NO_GROUP),
+        hidden: hiddenWalletGroups.has(NO_GROUP),
+      });
+    }
+    filters.innerHTML = chips
       .map(
-        (g) =>
-          `<button type="button" class="chip filter-chip" data-filter="${escapeHtml(g)}" ` +
-          `aria-pressed="${walletFilter === g}">${escapeHtml(g)}</button>`
+        (c) =>
+          `<button type="button" class="chip filter-chip${c.hidden ? " is-hidden-group" : ""}" ` +
+          `data-filter="${escapeHtml(c.key)}"` +
+          (c.hidden ? ` title="${escapeHtml(t("wallets.groups.hiddenTag"))}"` : "") +
+          `>${escapeHtml(c.label)}</button>`
       )
       .join("");
   }
+  syncWalletFilterChipState();
+  const toggle = $("wallet-show-hidden");
+  if (toggle) {
+    const n = hiddenWalletCount();
+    toggle.classList.toggle("hidden", n === 0 && !walletShowHidden);
+    toggle.classList.toggle("is-on", walletShowHidden);
+    toggle.setAttribute("aria-pressed", String(walletShowHidden));
+    toggle.textContent = t(
+      walletShowHidden ? "wallets.groups.hideHiddenBtn" : "wallets.groups.showHiddenBtn",
+      { n }
+    );
+  }
+}
 
+function syncWalletFilterChipState() {
+  document.querySelectorAll(".wallet-filters .filter-chip").forEach((b) => {
+    const on = (b.dataset.filter || "all") === walletFilter;
+    b.setAttribute("aria-pressed", String(on));
+    b.classList.toggle("is-on", on);
+  });
+}
+
+function renderWalletGroupsPanel() {
+  const list = $("wallet-groups-list");
+  if (!list) return;
+  const counts = walletGroupCounts();
+  const rows = walletGroupList.map((g) => ({ key: g, count: counts.get(g) || 0 }));
+  const ungrouped = counts.get(NO_GROUP) || 0;
+  if (ungrouped > 0 && (walletGroupList.length || hiddenWalletGroups.has(NO_GROUP))) {
+    rows.push({ key: NO_GROUP, count: ungrouped });
+  }
+  const summary = $("wallet-groups-summary");
+  if (summary) {
+    summary.textContent = walletGroupList.length
+      ? t("wallets.groups.summary", { n: walletGroupList.length })
+      : "";
+  }
+  if (!rows.length) {
+    list.innerHTML = `<p class="wg-empty muted small">${escapeHtml(t("wallets.groups.empty"))}</p>`;
+    return;
+  }
+  const btn = (action, label, { disabled = false, pressed = null, cls = "" } = {}) =>
+    `<button type="button" class="ghost-btn tight-btn${cls ? ` ${cls}` : ""}" data-wg-action="${action}"` +
+    (pressed == null ? "" : ` aria-pressed="${pressed}"`) +
+    (disabled ? " disabled" : "") +
+    `>${escapeHtml(label)}</button>`;
+  list.innerHTML = rows
+    .map(({ key, count }) => {
+      const isNone = key === NO_GROUP;
+      const hidden = hiddenWalletGroups.has(key);
+      const members = walletData.filter(
+        (w) => walletGroupOf(w.address) === key && !walletHiddenNow(w)
+      );
+      const allSelected =
+        members.length > 0 && members.every((w) => walletSelection.has(w.address));
+      return (
+        `<div class="wg-row${hidden ? " is-hidden" : ""}${isNone ? " is-none" : ""}" data-wg="${escapeHtml(key)}">` +
+        `<span class="wg-dot"${isNone ? "" : ` style="--g:${groupColor(key)}"`}></span>` +
+        `<button type="button" class="wg-name" data-wg-action="filter" title="${escapeHtml(
+          t("wallets.groups.filterTitle")
+        )}">${escapeHtml(groupLabel(key))}</button>` +
+        `<span class="wg-count">${escapeHtml(t("wallets.groups.count", { n: count }))}</span>` +
+        (hidden ? `<span class="wg-badge">${escapeHtml(t("wallets.groups.hiddenTag"))}</span>` : "") +
+        `<span class="wg-actions">` +
+        btn("select", t(allSelected ? "wallets.groups.unselect" : "wallets.groups.select"), {
+          disabled: !members.length,
+        }) +
+        btn("toggle-hidden", t(hidden ? "wallets.groups.show" : "wallets.groups.hide"), {
+          pressed: hidden,
+        }) +
+        (isNone
+          ? ""
+          : btn("rename", t("wallets.groups.rename")) +
+            btn("delete", t("wallets.groups.delete"), { cls: "wg-del" })) +
+        `</span></div>`
+      );
+    })
+    .join("");
+}
+
+function renderWalletBulkGroupSelect() {
+  const sel = $("wallet-bulk-group");
+  if (!sel) return;
+  const opts = [`<option value="">${escapeHtml(t("wallets.groups.moveTo"))}</option>`];
+  for (const g of walletGroupList) {
+    const suffix = hiddenWalletGroups.has(g) ? ` (${t("wallets.groups.hiddenTag")})` : "";
+    opts.push(`<option value="g:${escapeHtml(g)}">${escapeHtml(g + suffix)}</option>`);
+  }
+  opts.push(`<option value="none">${escapeHtml(t("wallets.groups.moveNone"))}</option>`);
+  opts.push(`<option value="new">${escapeHtml(t("wallets.groups.moveNew"))}</option>`);
+  sel.innerHTML = opts.join("");
+  sel.value = "";
+}
+
+function renderWalletHiddenHint() {
+  const hint = $("wallet-count-hint");
+  if (!hint) return;
+  const counts = walletGroupCounts();
+  const n = hiddenWalletCount();
+  const names = [...hiddenWalletGroups].filter((g) => (counts.get(g) || 0) > 0).map(groupLabel);
+  hint.textContent = n ? t("wallets.groups.hiddenNote", { n, groups: names.join(", ") }) : "";
+}
+
+function renderTaskGroupChips() {
   const taskChips = $("task-group-chips");
   if (taskChips) {
+    // Only groups that actually hold wallets are useful as a task filter.
+    const assigned = new Set(
+      Object.values(walletGroups)
+        .map((v) => String(v || "").trim())
+        .filter(Boolean)
+    );
     const all = [{ key: "all", label: t("wallets.fAll") || "All" }].concat(
-      groups.map((g) => ({ key: g, label: g }))
+      walletGroupList.filter((g) => assigned.has(g)).map((g) => ({ key: g, label: g }))
     );
     taskChips.innerHTML = all
       .map(
@@ -1102,6 +1312,8 @@ function paintWalletRow(i) {
   if (sel) tr.classList.add("selected");
   tr.style.height = ROW_H + "px";
   const g = walletGroupOf(w.address);
+  // Only reachable through "show hidden", a filter on the group or a search.
+  if (hiddenWalletGroups.has(g)) tr.classList.add("is-hidden-row");
   const route = walletProxyRouteOf(w);
   const autoLabel = `${t("wallets.proxyAuto") || "Auto"} (${w.proxy || "direct"})`;
   let proxyOpts =
@@ -1128,7 +1340,7 @@ function paintWalletRow(i) {
     <td class="muted">${w.index}</td>
     <td class="mono addr-copy" data-addr="${escapeHtml(w.address)}" title="${escapeHtml(w.address)} — ${escapeHtml(t("wallets.clickCopy") || "click to copy")}">${escapeHtml(shortAddr(w.address))}</td>
     <td><span class="wallet-group-pill${g ? " has-group" : ""}"${
-      g ? ` style="--g:${groupColor(g)}"` : ""
+      g ? ` style="--g:${groupColor(g)}" title="${escapeHtml(g)}"` : ""
     }>${g ? escapeHtml(g) : "—"}</span></td>
     <td><select class="wallet-proxy-sel" data-addr="${escapeHtml(w.address)}">${proxyOpts}</select></td>
     <td class="mono">${bal}</td>`;
@@ -1213,23 +1425,7 @@ async function loadWallets() {
   }
   if (selectionPruned) scheduleSaveWalletMeta();
   updateWalletBulk();
-  const hint = $("wallet-count-hint");
-  if (hint) {
-    // Total wallets and proxy count now live in the status strip; keep only the
-    // group breakdown, which the strip doesn't carry. Built from the groups that
-    // actually exist rather than a hardcoded A/B/C.
-    const counts = new Map();
-    for (const w of walletData) {
-      const g = walletGroupOf(w.address);
-      if (g) counts.set(g, (counts.get(g) || 0) + 1);
-    }
-    hint.textContent = counts.size
-      ? [...counts.entries()]
-          .sort((a, b) => a[0].localeCompare(b[0]))
-          .map(([g, n]) => `${g}:${n}`)
-          .join(" · ")
-      : "";
-  }
+  // Per-group counts live in the Groups panel; the hint line reports hidden wallets.
   renderGroupControls();
   bindVirtualScroll("wallet-table-wrap", renderWalletsVirtual);
   applyWalletView();
@@ -1247,13 +1443,17 @@ let walletView = [];
 function applyWalletView() {
   const q = walletQuery.trim().toLowerCase();
   walletView = (walletData || []).filter((w) => {
-    // Anything that is not a reserved keyword is a (free-form) group name.
-    if (walletFilter !== "all" && walletFilter !== "funded") {
-      if (walletGroupOf(w.address) !== walletFilter) return false;
-    } else if (walletFilter === "funded") {
+    const g = walletGroupOf(w.address);
+    if (walletFilter === "funded") {
       // Unknown balance is kept: absence of data isn't evidence of zero.
       if (w.balanceEth != null && !(parseFloat(w.balanceEth) > 0)) return false;
+    } else if (walletFilter === NO_GROUP_FILTER) {
+      if (g !== NO_GROUP) return false;
+    } else if (walletFilter !== "all") {
+      // Anything that is not a reserved keyword is a (free-form) group name.
+      if (g !== walletFilter) return false;
     }
+    if (walletHiddenNow(w)) return false;
     if (q) {
       // A digits-only query means "wallet #N" — match the index, not any address
       // that happens to contain those digits (searching "6" otherwise matched
@@ -1266,12 +1466,23 @@ function applyWalletView() {
     }
     return true;
   });
+  // A hidden row must never stay selected: bulk Delete / Withdraw would act on
+  // wallets the operator can no longer see.
+  let pruned = false;
+  for (const w of walletData || []) {
+    if (walletSelection.has(w.address) && walletHiddenNow(w)) {
+      walletSelection.delete(w.address);
+      pruned = true;
+    }
+  }
+  if (pruned) scheduleSaveWalletMeta();
   const cnt = $("wallet-search-count");
   if (cnt) {
     cnt.textContent = walletQuery
       ? `${walletView.length} / ${(walletData || []).length}`
       : "";
   }
+  updateWalletBulk();
   renderWalletsVirtual();
 }
 
@@ -1310,15 +1521,21 @@ $("wallet-search")?.addEventListener("keydown", (e) => {
 
 // Delegated: group chips are generated from live data, so per-element binding
 // at load time would miss every group created afterwards.
+function setWalletFilter(key) {
+  walletFilter = key || "all";
+  syncWalletFilterChipState();
+  applyWalletView();
+}
+
 document.addEventListener("click", (e) => {
   const btn = e.target.closest?.(".filter-chip");
   if (!btn || !btn.closest(".wallet-filters")) return;
-  walletFilter = btn.dataset.filter || "all";
-  document.querySelectorAll(".wallet-filters .filter-chip").forEach((b) => {
-    const on = b === btn;
-    b.setAttribute("aria-pressed", String(on));
-    b.classList.toggle("is-on", on);
-  });
+  setWalletFilter(btn.dataset.filter || "all");
+});
+
+$("wallet-show-hidden")?.addEventListener("click", () => {
+  walletShowHidden = !walletShowHidden;
+  renderWalletFilterChips();
   applyWalletView();
 });
 
@@ -1339,15 +1556,21 @@ function updateWalletBulk() {
   if (sweep) sweep.disabled = n === 0;
   if (toTask) toTask.disabled = n === 0;
   const all = $("wallets-select-all");
-  if (all && walletData.length) {
-    all.checked = n > 0 && n === walletData.length;
-    all.indeterminate = n > 0 && n < walletData.length;
+  if (all) {
+    // Mirrors the visible rows, which is also what the checkbox selects.
+    const allVisible =
+      walletView.length > 0 && walletView.every((w) => walletSelection.has(w.address));
+    all.checked = allVisible;
+    all.indeterminate = n > 0 && !allVisible;
   }
+  // Group rows show "Select" / "Unselect" depending on the selection.
+  renderWalletGroupsPanel();
 }
 
 function setSelectedGroup(group) {
-  if (!walletSelection.size) {
-    if ($("wallet-msg")) $("wallet-msg").textContent = "Select wallets first";
+  const n = walletSelection.size;
+  if (!n) {
+    if ($("wallet-msg")) $("wallet-msg").textContent = t("wallets.groups.needSel");
     return;
   }
   for (const a of walletSelection) {
@@ -1355,45 +1578,218 @@ function setSelectedGroup(group) {
     if (!group) delete walletGroups[k];
     else walletGroups[k] = group;
   }
+  if (group && !walletGroupList.includes(group)) walletGroupList.push(group);
   scheduleSaveWalletMeta();
-  renderWalletsVirtual();
-  // A brand-new group must appear in the chip rows immediately.
   renderGroupControls();
+  // Re-filter: moved wallets can leave the current filter or land in a hidden group.
+  applyWalletView();
   if ($("wallet-msg")) {
-    $("wallet-msg").textContent = group
-      ? `Set group ${group} on ${walletSelection.size} wallet(s)`
-      : `Cleared group on ${walletSelection.size} wallet(s)`;
+    let msg = group
+      ? t("wallets.groups.assigned", { n, name: group })
+      : t("wallets.groups.cleared", { n });
+    if (group && hiddenWalletGroups.has(group)) msg += ` ${t("wallets.groups.assignedHidden")}`;
+    $("wallet-msg").textContent = msg;
   }
-  const hint = $("wallet-count-hint");
-  if (hint) loadWallets(); // refresh counts
 }
 
-// Delegated for the same reason as the filter chips above.
-document.addEventListener("click", (e) => {
-  const btn = e.target.closest?.(".btn-group[data-group]");
-  if (!btn) return;
-  setSelectedGroup(btn.dataset.group || "");
-});
+/** Select every visible wallet of a group, or unselect them when all already are. */
+function toggleSelectWalletGroup(g) {
+  const members = walletData.filter((w) => walletGroupOf(w.address) === g && !walletHiddenNow(w));
+  if (!members.length) return;
+  const allSelected = members.every((w) => walletSelection.has(w.address));
+  for (const w of members) {
+    if (allSelected) walletSelection.delete(w.address);
+    else walletSelection.add(w.address);
+  }
+  updateWalletBulk();
+  renderWalletsVirtual();
+  scheduleSaveWalletMeta();
+}
 
-$("btn-group-new")?.addEventListener("click", () => {
-  if (!walletSelection.size) {
-    $("wallet-msg").textContent =
-      t("wallets.groupNeedSel") || "Select wallets first, then create a group.";
+function toggleWalletGroupHidden(g) {
+  if (hiddenWalletGroups.has(g)) hiddenWalletGroups.delete(g);
+  else hiddenWalletGroups.add(g);
+  scheduleSaveWalletMeta();
+  renderGroupControls();
+  applyWalletView();
+}
+
+async function createWalletGroup() {
+  const selected = walletSelection.size;
+  const res = await openGroupNameModal({
+    title: t("wallets.groups.newTitle"),
+    okLabel: t("wallets.groups.create"),
+    assignCount: selected,
+  });
+  if (!res) return;
+  if (!walletGroupList.includes(res.name)) walletGroupList.push(res.name);
+  if (res.assign && selected) {
+    setSelectedGroup(res.name);
     return;
   }
-  const raw = window.prompt(t("wallets.groupPrompt") || "New group name:", "");
-  if (raw == null) return;
-  // Group names end up in file-backed metadata and in chip labels; keep them
-  // short and free of the separators the rest of the UI splits on.
-  const name = String(raw).trim().replace(/[,\s]+/g, "-").slice(0, 24);
-  if (!name) return;
-  setSelectedGroup(name);
+  scheduleSaveWalletMeta();
+  renderGroupControls();
+  if ($("wallet-msg")) $("wallet-msg").textContent = t("wallets.groups.created", { name: res.name });
+}
+
+async function renameWalletGroup(g) {
+  const res = await openGroupNameModal({
+    title: t("wallets.groups.renameTitle"),
+    okLabel: t("wallets.groups.save"),
+    initial: g,
+    original: g,
+  });
+  if (!res || res.name === g) return;
+  const name = res.name;
+  for (const [k, v] of Object.entries(walletGroups)) {
+    if (v === g) walletGroups[k] = name;
+  }
+  walletGroupList = walletGroupList.map((x) => (x === g ? name : x));
+  if (hiddenWalletGroups.delete(g)) hiddenWalletGroups.add(name);
+  if (walletFilter === g) walletFilter = name;
+  scheduleSaveWalletMeta();
+  renderGroupControls();
+  applyWalletView();
+  if ($("wallet-msg")) $("wallet-msg").textContent = t("wallets.groups.renamed", { name });
+}
+
+async function deleteWalletGroup(g) {
+  const n = walletData.filter((w) => walletGroupOf(w.address) === g).length;
+  const ok = await openConfirmModal({
+    title: t("wallets.groups.deleteTitle", { name: g }),
+    body: t("wallets.groups.deleteBody", { n }),
+    okLabel: t("wallets.groups.delete"),
+  });
+  if (!ok) return;
+  for (const [k, v] of Object.entries(walletGroups)) {
+    if (v === g) delete walletGroups[k];
+  }
+  walletGroupList = walletGroupList.filter((x) => x !== g);
+  hiddenWalletGroups.delete(g);
+  if (walletFilter === g) walletFilter = "all";
+  scheduleSaveWalletMeta();
+  renderGroupControls();
+  applyWalletView();
+  if ($("wallet-msg")) $("wallet-msg").textContent = t("wallets.groups.deleted", { name: g });
+}
+
+$("wallet-groups-list")?.addEventListener("click", (e) => {
+  const btn = e.target.closest?.("[data-wg-action]");
+  const row = btn?.closest(".wg-row");
+  if (!btn || !row || btn.disabled) return;
+  const g = row.dataset.wg ?? NO_GROUP;
+  const action = btn.dataset.wgAction;
+  if (action === "filter") setWalletFilter(groupFilterKey(g));
+  else if (action === "select") toggleSelectWalletGroup(g);
+  else if (action === "toggle-hidden") toggleWalletGroupHidden(g);
+  else if (action === "rename") renameWalletGroup(g).catch((err) => showToast(String(err), "warn"));
+  else if (action === "delete") deleteWalletGroup(g).catch((err) => showToast(String(err), "warn"));
+});
+
+$("btn-group-create")?.addEventListener("click", () => {
+  createWalletGroup().catch((err) => showToast(String(err), "warn"));
+});
+
+$("wallet-bulk-group")?.addEventListener("change", (e) => {
+  const v = e.target.value;
+  e.target.value = "";
+  if (v === "new") createWalletGroup().catch((err) => showToast(String(err), "warn"));
+  else if (v === "none") setSelectedGroup(NO_GROUP);
+  else if (v.startsWith("g:")) setSelectedGroup(v.slice(2));
+});
+
+(() => {
+  // Remember whether the operator keeps the Groups panel open.
+  const panel = $("wallet-groups-panel");
+  if (!panel) return;
+  const KEY = "minter_wallet_groups_open";
+  if (localStorage.getItem(KEY) === "0") panel.open = false;
+  panel.addEventListener("toggle", () => localStorage.setItem(KEY, panel.open ? "1" : "0"));
+})();
+
+// —— Group name dialog (in-app: window.prompt is unreliable in the WebView / noVNC) ——
+let groupModalResolve = null;
+let groupModalOriginal = null;
+
+/** Resolves to `{ name, assign }`, or `null` when cancelled. */
+function openGroupNameModal({ title, okLabel, initial = "", original = null, assignCount = 0 }) {
+  return new Promise((resolve) => {
+    if (groupModalResolve) {
+      const prev = groupModalResolve;
+      groupModalResolve = null;
+      prev(null);
+    }
+    groupModalResolve = resolve;
+    groupModalOriginal = original;
+    $("group-modal-title").textContent = title;
+    $("group-modal-ok").textContent = okLabel;
+    $("group-modal-error").textContent = "";
+    const input = $("group-modal-input");
+    input.value = initial;
+    input.maxLength = MAX_GROUP_NAME;
+    const wrap = $("group-modal-assign-wrap");
+    if (assignCount > 0) {
+      show(wrap);
+      $("group-modal-assign").checked = true;
+      $("group-modal-assign-label").textContent = t("wallets.groups.addSelected", {
+        n: assignCount,
+      });
+    } else {
+      hide(wrap);
+    }
+    show($("group-modal"));
+    trapFocus($("group-modal"));
+    setTimeout(() => {
+      input.focus();
+      input.select();
+    }, 50);
+  });
+}
+
+function closeGroupModal(result) {
+  hide($("group-modal"));
+  releaseFocus($("group-modal"));
+  const r = groupModalResolve;
+  groupModalResolve = null;
+  if (r) r(result);
+}
+
+function submitGroupModal() {
+  const name = normalizeGroupName($("group-modal-input").value);
+  const err = groupNameError(name, groupModalOriginal);
+  if (err) {
+    $("group-modal-error").textContent = err;
+    return;
+  }
+  const wrap = $("group-modal-assign-wrap");
+  closeGroupModal({
+    name,
+    assign: !wrap.classList.contains("hidden") && $("group-modal-assign").checked,
+  });
+}
+
+$("group-modal-ok")?.addEventListener("click", submitGroupModal);
+$("group-modal-cancel")?.addEventListener("click", () => closeGroupModal(null));
+$("group-modal")?.addEventListener("click", (e) => {
+  if (e.target === $("group-modal")) closeGroupModal(null);
+});
+$("group-modal-input")?.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    submitGroupModal();
+  } else if (e.key === "Escape") {
+    // Handled here so the global Esc handler does not also close something else.
+    e.preventDefault();
+    e.stopPropagation();
+    closeGroupModal(null);
+  }
 });
 
 $("wallets-select-all")?.addEventListener("change", (e) => {
   const on = e.target.checked;
   if (on) {
-    for (const w of walletData) walletSelection.add(w.address);
+    // Only rows the operator can see: current filter / search, never hidden groups.
+    for (const w of walletView) walletSelection.add(w.address);
   } else {
     walletSelection.clear();
   }
@@ -2473,46 +2869,176 @@ $("btn-clear-auth").addEventListener("click", async () => {
 });
 
 // —— WL Check page (multi-wallet eligibility + proxies) ——
+/** Vault wallets as last listed for the WL picker. */
+let wlWalletCache = [];
+/** addrKey of every ticked wallet; survives page switches. */
+let wlChecked = new Set();
+let wlSeeded = false;
+/** Hidden groups at the last visit — a group hidden since then gets unticked. */
+let wlHiddenSnapshot = null;
+
+function wlIsHidden(w) {
+  return hiddenWalletGroups.has(walletGroupOf(w.address));
+}
+
+/** Hidden-group wallets stay listed while ticked, so nothing checked is ever invisible. */
+function wlWalletVisible(w) {
+  return !wlIsHidden(w) || wlChecked.has(addrKey(w.address));
+}
+
 async function loadWlWallets() {
   const box = $("wl-wallet-list");
   if (!box) return;
   try {
-    const list = await invoke("list_wallets");
-    if (!list.length) {
-      box.innerHTML = `<div class="muted" style="padding:8px">${escapeHtml(t("wallets.empty"))}</div>`;
-      return;
+    // Groups live in wallet_meta.json; this page may be the first one opened.
+    if (!walletMetaLoaded) await loadWalletMeta();
+    const list = (await invoke("list_wallets")) || [];
+    wlWalletCache = list;
+    const present = new Set(list.map((w) => addrKey(w.address)));
+    for (const k of [...wlChecked]) if (!present.has(k)) wlChecked.delete(k);
+    if (!wlSeeded || !wlChecked.size) {
+      // First visit (or nothing ticked): every wallet outside hidden groups.
+      wlSeeded = list.length > 0;
+      for (const w of list) if (!wlIsHidden(w)) wlChecked.add(addrKey(w.address));
+    } else if (wlHiddenSnapshot) {
+      for (const w of list) {
+        const g = walletGroupOf(w.address);
+        if (hiddenWalletGroups.has(g) && !wlHiddenSnapshot.has(g)) {
+          wlChecked.delete(addrKey(w.address));
+        }
+      }
     }
-    const prev = new Set(
-      [...document.querySelectorAll(".wl-wallet-cb:checked")].map((c) =>
-        String(c.value).toLowerCase()
-      )
-    );
-    const keepPrev = prev.size > 0;
-    box.innerHTML = "";
-    for (const w of list) {
-      const row = document.createElement("div");
-      row.className = "task-wallet-row";
-      const checked = keepPrev
-        ? prev.has(String(w.address).toLowerCase())
-        : true;
-      row.innerHTML = `<input type="checkbox" class="wl-wallet-cb" value="${escapeHtml(w.address)}" ${
-        checked ? "checked" : ""
-      } />
-        <span>${w.index}. ${escapeHtml(shortAddr(w.address))}</span>`;
-      box.appendChild(row);
-    }
-    if ($("wl-wallets-all")) {
-      const cbs = [...document.querySelectorAll(".wl-wallet-cb")];
-      $("wl-wallets-all").checked =
-        cbs.length > 0 && cbs.every((c) => c.checked);
-    }
+    wlHiddenSnapshot = new Set(hiddenWalletGroups);
+    renderWlWalletList();
   } catch (e) {
     box.textContent = String(e);
   }
 }
 
+function renderWlWalletList() {
+  const box = $("wl-wallet-list");
+  if (!box) return;
+  const list = wlWalletCache;
+  if (!list.length) {
+    box.innerHTML = `<div class="muted" style="padding:8px">${escapeHtml(t("wallets.empty"))}</div>`;
+    renderWlGroupChips();
+    updateWlSelectionUi();
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  for (const w of list) {
+    if (!wlWalletVisible(w)) continue;
+    const g = walletGroupOf(w.address);
+    const row = document.createElement("label");
+    row.className = `task-wallet-row wl-wallet-row${wlIsHidden(w) ? " is-hidden-row" : ""}`;
+    row.innerHTML =
+      `<input type="checkbox" class="wl-wallet-cb" value="${escapeHtml(w.address)}" ${
+        wlChecked.has(addrKey(w.address)) ? "checked" : ""
+      } />` +
+      `<span class="wl-wallet-addr">${w.index}. ${escapeHtml(shortAddr(w.address))}</span>` +
+      (g
+        ? `<span class="wallet-group-pill has-group" style="--g:${groupColor(g)}" title="${escapeHtml(
+            g
+          )}">${escapeHtml(g)}</span>`
+        : "");
+    frag.appendChild(row);
+  }
+  box.replaceChildren(frag);
+  renderWlGroupChips();
+  updateWlSelectionUi();
+}
+
+function renderWlGroupChips() {
+  const box = $("wl-group-chips");
+  if (!box) return;
+  const stats = new Map();
+  for (const w of wlWalletCache) {
+    const g = walletGroupOf(w.address);
+    const s = stats.get(g) || { total: 0, checked: 0 };
+    s.total++;
+    if (wlChecked.has(addrKey(w.address))) s.checked++;
+    stats.set(g, s);
+  }
+  const keys = walletGroupList.filter((g) => stats.has(g));
+  if (keys.length && stats.has(NO_GROUP)) keys.push(NO_GROUP);
+  box.classList.toggle("hidden", !keys.length);
+  if (!keys.length) {
+    box.innerHTML = "";
+    return;
+  }
+  box.innerHTML =
+    `<span class="muted small wl-gc-label">${escapeHtml(t("wl.groups"))}</span>` +
+    keys
+      .map((g) => {
+        const s = stats.get(g);
+        const state = s.checked === 0 ? "none" : s.checked === s.total ? "full" : "partial";
+        const pressed = state === "full" ? "true" : state === "partial" ? "mixed" : "false";
+        const hidden = hiddenWalletGroups.has(g);
+        return (
+          `<button type="button" class="wl-group-chip is-${state}${hidden ? " is-hidden-group" : ""}" ` +
+          `data-wl-group="${escapeHtml(g)}" aria-pressed="${pressed}" title="${escapeHtml(
+            t("wl.groupToggleTitle")
+          )}">` +
+          `<span class="wg-dot"${g === NO_GROUP ? "" : ` style="--g:${groupColor(g)}"`}></span>` +
+          `<span class="wl-gc-name">${escapeHtml(groupLabel(g))}</span>` +
+          `<span class="wl-gc-count">${s.checked}/${s.total}</span>` +
+          (hidden
+            ? `<span class="wl-gc-hidden">${escapeHtml(t("wallets.groups.hiddenTag"))}</span>`
+            : "") +
+          `</button>`
+        );
+      })
+      .join("");
+}
+
+function updateWlSelectionUi() {
+  const total = wlWalletCache.length;
+  const n = wlWalletCache.filter((w) => wlChecked.has(addrKey(w.address))).length;
+  const hidden = wlWalletCache.filter(wlIsHidden).length;
+  const cnt = $("wl-selected-count");
+  if (cnt) {
+    cnt.textContent = total
+      ? t("wl.selectedN", { n, total }) + (hidden ? ` · ${t("wl.hiddenN", { n: hidden })}` : "")
+      : "";
+  }
+  const all = $("wl-wallets-all");
+  if (all) {
+    const pool = wlWalletCache.filter(wlWalletVisible);
+    const allOn = pool.length > 0 && pool.every((w) => wlChecked.has(addrKey(w.address)));
+    all.checked = allOn;
+    all.indeterminate = !allOn && n > 0;
+  }
+}
+
+$("wl-wallet-list")?.addEventListener("change", (e) => {
+  const cb = e.target.closest?.(".wl-wallet-cb");
+  if (!cb) return;
+  const key = addrKey(cb.value);
+  if (cb.checked) wlChecked.add(key);
+  else wlChecked.delete(key);
+  // No full re-render: an unticked hidden-group row stays until the next render
+  // instead of vanishing under the cursor.
+  renderWlGroupChips();
+  updateWlSelectionUi();
+});
+
+$("wl-group-chips")?.addEventListener("click", (e) => {
+  const btn = e.target.closest?.(".wl-group-chip");
+  if (!btn) return;
+  const g = btn.dataset.wlGroup ?? NO_GROUP;
+  const members = wlWalletCache.filter((w) => walletGroupOf(w.address) === g);
+  if (!members.length) return;
+  // Partially ticked → tick the rest; fully ticked → untick the group.
+  const allOn = members.every((w) => wlChecked.has(addrKey(w.address)));
+  for (const w of members) {
+    if (allOn) wlChecked.delete(addrKey(w.address));
+    else wlChecked.add(addrKey(w.address));
+  }
+  renderWlWalletList();
+});
+
 function selectedWlWallets() {
-  return [...document.querySelectorAll(".wl-wallet-cb:checked")].map((cb) => cb.value);
+  return wlWalletCache.filter((w) => wlChecked.has(addrKey(w.address))).map((w) => w.address);
 }
 
 function wlStageChips(labels, kind, maxShow = 4) {
@@ -2634,9 +3160,13 @@ function renderWlReport(report) {
 
 $("wl-wallets-all")?.addEventListener("change", (e) => {
   const on = e.target.checked;
-  document.querySelectorAll(".wl-wallet-cb").forEach((cb) => {
-    cb.checked = on;
-  });
+  if (on) {
+    // "All" means all visible: hidden groups are only ticked through their chip.
+    for (const w of wlWalletCache) if (!wlIsHidden(w)) wlChecked.add(addrKey(w.address));
+  } else {
+    wlChecked.clear();
+  }
+  renderWlWalletList();
 });
 
 const WL_THREADS_KEY = "minter_wl_threads";
@@ -5120,6 +5650,11 @@ async function loadTaskModalWallets(preselect) {
   const box = $("task-wallet-list");
   if (!box) return;
   try {
+    // Group chips need wallet_meta.json even if the Wallets page was never opened.
+    if (!walletMetaLoaded) {
+      await loadWalletMeta();
+      renderTaskGroupChips();
+    }
     const list = await invoke("list_wallets");
     taskModalWalletCache = list || [];
     vaultAddrSet = new Set(list.map((w) => String(w.address).toLowerCase()));
@@ -7261,6 +7796,12 @@ document.addEventListener("keydown", (e) => {
     if (confirmOverlay && !confirmOverlay.classList.contains("hidden")) {
       e.preventDefault();
       closeModal(false);
+      return;
+    }
+    const groupModal = $("group-modal");
+    if (groupModal && !groupModal.classList.contains("hidden")) {
+      e.preventDefault();
+      closeGroupModal(null);
       return;
     }
     const taskModal = $("task-modal");

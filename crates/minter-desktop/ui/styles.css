@@ -4612,3 +4612,257 @@ textarea#add-key {
 .update-dismiss:hover {
   opacity: 1;
 }
+
+/* —— Wallet groups: manager panel, hidden groups, WL group picker ————————— */
+.wallet-toolbar {
+  justify-content: flex-end;
+}
+
+.wallet-group-pill {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.wallet-groups-panel {
+  margin: 0 0 10px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+
+.wallet-groups-panel > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 0;
+  cursor: pointer;
+  list-style: none;
+  font-size: 0.82rem;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.wallet-groups-panel > summary::-webkit-details-marker {
+  display: none;
+}
+
+.wallet-groups-panel > summary::before {
+  content: "▸";
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.wallet-groups-panel[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .wallet-groups-panel > summary::before {
+    transition: transform var(--t-fast, 140ms) ease;
+  }
+}
+
+.wallet-groups-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.wg-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 36px;
+  padding: 3px 6px;
+  border-radius: 6px;
+}
+
+.wg-row:hover {
+  background: rgba(109, 94, 252, 0.06);
+}
+
+.wg-dot {
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--g, transparent);
+  border: 1px solid var(--g, var(--muted-2));
+}
+
+.wg-name {
+  appearance: none;
+  height: auto;
+  min-height: 0;
+  max-width: 240px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font-size: 0.84rem;
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.wg-name:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.wg-count {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  white-space: nowrap;
+}
+
+.wg-badge {
+  padding: 1px 6px;
+  border: 1px solid rgba(245, 200, 76, 0.4);
+  border-radius: 4px;
+  background: var(--yellow-dim);
+  color: var(--yellow);
+  font-size: 0.68rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.wg-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.wg-row.is-hidden .wg-name,
+.wg-row.is-hidden .wg-count,
+.wg-row.is-hidden .wg-dot {
+  opacity: 0.55;
+}
+
+.wg-row.is-none .wg-name {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.wg-actions .wg-del {
+  color: #ff8a8a;
+  border-color: rgba(255, 107, 107, 0.35);
+}
+
+.wg-actions .wg-del:hover {
+  background: var(--red-dim);
+  border-color: rgba(255, 107, 107, 0.6);
+}
+
+.wg-empty {
+  margin: 0 0 6px;
+}
+
+.wallet-groups-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0 10px;
+}
+
+.filter-chip.is-hidden-group {
+  border-style: dashed;
+  opacity: 0.7;
+}
+
+#wallet-show-hidden.is-on {
+  border-color: rgba(245, 200, 76, 0.45);
+  background: var(--yellow-dim);
+  color: var(--yellow);
+}
+
+.data-table tr.is-hidden-row td {
+  opacity: 0.55;
+}
+
+.bulk-group-select {
+  width: auto;
+  min-width: 170px;
+}
+
+.wl-group-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 8px;
+}
+
+.wl-gc-label {
+  margin-right: 2px;
+}
+
+.wl-group-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 6px;
+  font-size: 0.78rem;
+}
+
+.wl-group-chip.is-full {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+}
+
+.wl-group-chip.is-partial {
+  border-style: dashed;
+  border-color: var(--accent-border);
+}
+
+.wl-gc-count {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+}
+
+.wl-gc-hidden {
+  color: var(--yellow);
+  font-size: 0.66rem;
+}
+
+.wl-group-chip.is-hidden-group .wl-gc-name {
+  opacity: 0.7;
+}
+
+.task-wallet-row.is-hidden-row {
+  opacity: 0.6;
+}
+
+.wl-wallet-row .wallet-group-pill {
+  max-width: 180px;
+  margin-left: auto;
+}
+
+.wl-selected-count {
+  font-weight: 500;
+  margin-left: 6px;
+}
+
+.group-modal-field {
+  margin: 8px 0 6px;
+}
+
+.wg-actions .ghost-btn {
+  height: 28px;
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 0.76rem;
+}

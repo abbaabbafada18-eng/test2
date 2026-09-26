@@ -767,9 +767,10 @@
                       <input type="text" id="wl-slug" placeholder="bfers" autocomplete="off" />
                     </label>
                     <div class="wallet-pick-head">
-                      <span data-i18n="wl.pickWallets">Wallets to check</span>
+                      <span><span data-i18n="wl.pickWallets">Wallets to check</span> <span id="wl-selected-count" class="muted small wl-selected-count"></span></span>
                       <label class="check tight"><input type="checkbox" id="wl-wallets-all" checked /> <span data-i18n="tasks.selectAll">Select all</span></label>
                     </div>
+                    <div id="wl-group-chips" class="wl-group-chips hidden"></div>
                     <div id="wl-wallet-list" class="task-wallet-list muted">Unlock vault to load wallets…</div>
                     <div class="wl-actions">
                       <button type="button" id="btn-wl-check" class="primary" data-i18n="wl.run">Check WL</button>
@@ -829,15 +830,21 @@
                   <button type="button" class="chip filter-chip" data-filter="all" aria-pressed="true" data-i18n="wallets.fAll">All</button>
                   <span id="wallet-filter-groups"></span>
                   <button type="button" class="chip filter-chip" data-filter="funded" aria-pressed="false" data-i18n="wallets.fFunded">Funded</button>
+                  <button type="button" id="wallet-show-hidden" class="chip hidden" aria-pressed="false"></button>
                   <button type="button" id="btn-wallet-search-open" class="chip" title="Ctrl+F" aria-label="Search wallets">⌕</button>
                 </div>
-                <div class="wallet-toolbar">
-                  <div class="wallet-group-btns">
-                    <span class="muted small" data-i18n="wallets.group">Group</span>
-                    <span id="wallet-group-chips"></span>
-                    <button type="button" id="btn-group-new" class="btn-group btn-group-new" data-i18n-title="wallets.groupNew" title="Create a new group">+</button>
-                    <button type="button" class="btn-group" data-group="" title="Clear group" aria-label="Clear group assignment">∅</button>
+                <details id="wallet-groups-panel" class="wallet-groups-panel" open>
+                  <summary>
+                    <span data-i18n="wallets.groups.title">Groups</span>
+                    <span id="wallet-groups-summary" class="muted small"></span>
+                  </summary>
+                  <div id="wallet-groups-list" class="wallet-groups-list"></div>
+                  <div class="wallet-groups-foot">
+                    <button type="button" id="btn-group-create" class="ghost-btn tight-btn" data-i18n="wallets.groups.new">+ New group</button>
+                    <span class="muted small" data-i18n="wallets.groups.help">Hidden groups disappear from the wallet list and the WL check picker. Wallets stay in the vault.</span>
                   </div>
+                </details>
+                <div class="wallet-toolbar">
                   <div class="wallet-toolbar-actions">
                     <label class="inline-field tight">
                       <span class="muted small" data-i18n="wallets.balChain">Network</span>
@@ -868,7 +875,7 @@
                         <th style="width:34px"><input type="checkbox" id="wallets-select-all" title="Select all" aria-label="Select all wallets" /></th>
                         <th style="width:46px">#</th>
                         <th style="width:38%" data-i18n="col.address">Address</th>
-                        <th style="width:52px" data-i18n="wallets.col.group">Grp</th>
+                        <th style="width:110px" data-i18n="wallets.col.group">Grp</th>
                         <th style="width:22%" data-i18n="wallets.col.proxy">Proxy</th>
                         <th style="width:110px" data-i18n="wallets.col.balance">Balance</th>
                       </tr>
@@ -879,6 +886,7 @@
                 <div id="wallet-bulk-bar" class="bulk-bar hidden">
                   <span class="bulk-count"><span id="wallet-selected-count">0</span> <span data-i18n="wallets.selected">Selected</span></span>
                   <div class="bulk-actions">
+                    <select id="wallet-bulk-group" class="bulk-group-select" aria-label="Move to group"></select>
                     <button type="button" id="btn-wallets-copy" data-i18n="wallets.copy">Copy addresses</button>
                     <button type="button" id="btn-wallets-sweep" class="spend-btn" data-i18n="wallets.sweepSelected">Withdraw all ETH</button>
                     <button type="button" class="danger-btn" id="btn-wallets-remove-sel" data-i18n="wallets.delete">Delete</button>
@@ -1283,6 +1291,25 @@
         <input type="text" id="cmd-input" aria-label="Command search" class="cmd-input" autocomplete="off" spellcheck="false" data-i18n-placeholder="cmd.placeholder" placeholder="Jump to a page or action…" />
         <ul id="cmd-list" class="cmd-list" role="listbox"></ul>
         <div class="cmd-foot muted small"><span>↑↓</span> select · <span>↵</span> open · <span>Esc</span> close</div>
+      </div>
+    </div>
+
+    <div id="group-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="group-modal-title">
+      <div class="modal-card">
+        <h3 id="group-modal-title">New group</h3>
+        <label class="group-modal-field">
+          <span class="muted small" data-i18n="wallets.groups.nameLabel">Group name</span>
+          <input type="text" id="group-modal-input" maxlength="24" autocomplete="off" spellcheck="false" />
+        </label>
+        <label id="group-modal-assign-wrap" class="check hidden">
+          <input type="checkbox" id="group-modal-assign" checked />
+          <span id="group-modal-assign-label"></span>
+        </label>
+        <p id="group-modal-error" class="error"></p>
+        <div class="row actions modal-actions">
+          <button type="button" id="group-modal-cancel" data-i18n="modal.cancel">Cancel</button>
+          <button type="button" id="group-modal-ok" class="primary">Create</button>
+        </div>
       </div>
     </div>
 

@@ -254,6 +254,9 @@ pub struct AppState {
     /// Serializes batch wallet runs (WL check), so the single shared
     /// `batch_cancel` token always belongs to exactly one run.
     pub batch_limit: Arc<tokio::sync::Semaphore>,
+    /// Folder of config.json, where the UI state files live. Resolved once so
+    /// saving UI state never waits on a session lock held by a slow vault op.
+    state_dir: std::sync::OnceLock<std::path::PathBuf>,
 }
 
 /// Max simultaneous network/probe commands (see [`AppState::net_limit`]).
@@ -430,6 +433,7 @@ impl Default for AppState {
             save_lock: Arc::new(Mutex::new(())),
             net_limit: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_NET_CMDS)),
             batch_limit: Arc::new(tokio::sync::Semaphore::new(1)),
+            state_dir: std::sync::OnceLock::new(),
         }
     }
 }
@@ -550,7 +554,9 @@ fn note_activity(state: State<'_, Arc<AppState>>) {
 }
 
 /// Pure policy: LIVE confirm required?
-#[tauri::command]
+// `async` = runs off the main thread: a vault operation holding the session
+// lock (PBKDF2 on import/delete) no longer freezes the window.
+#[tauri::command(async)]
 fn live_confirm_required(state: State<'_, Arc<AppState>>, dry_run: bool) -> bool {
     let s = state.session.lock();
     minter_core::live_confirm_required(s.settings.require_live_confirm, dry_run)
@@ -567,7 +573,7 @@ fn no_proxy_warn_message(wallet_count: u32) -> String {
     minter_core::no_proxy_multi_wallet_message(wallet_count as usize)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_status(state: State<'_, Arc<AppState>>) -> UiStatus {
     let s = state.session.lock();
     let (hint_title, hint_body) = if !s.has_wallets() {
@@ -611,7 +617,7 @@ fn get_status(state: State<'_, Arc<AppState>>) -> UiStatus {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_wallets(state: State<'_, Arc<AppState>>) -> Vec<minter_core::WalletInfo> {
     state.session.lock().list_wallets()
 }
@@ -810,7 +816,7 @@ async fn import_keys_text(state: State<'_, Arc<AppState>>, text: String) -> Resu
     .map_err(|e| e.to_string())?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_proxies(state: State<'_, Arc<AppState>>) -> Vec<minter_core::ProxyListItem> {
     state.session.lock().list_proxies()
 }
@@ -1052,7 +1058,7 @@ impl SettingsDto {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_settings(state: State<'_, Arc<AppState>>) -> SettingsDto {
     let s = state.session.lock();
     SettingsDto::from_session(&s)
@@ -1226,7 +1232,7 @@ fn apply_sniper(state: State<'_, Arc<AppState>>) {
     state.session.lock().apply_sniper_preset();
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn security_status(state: State<'_, Arc<AppState>>) -> minter_core::SecurityStatus {
     state.session.lock().security_status()
 }
@@ -1558,13 +1564,13 @@ struct WlPhaseSet {
     addresses: Vec<String>,
 }
 
-/// WL-eligible addresses from the most recent saved WL check for a collection,
-/// **kept split per phase**.
+/// WL-eligible addresses from the saved WL checks of a collection, **kept
+/// split per phase**.
 ///
 /// The eligibility check writes `results/wl_{slug}_{ts}/` with one `.txt` per
-/// eligible phase plus `not_eligible.txt`; this reads the newest such directory
-/// back so the task modal can pre-select exactly the right wallets instead of
-/// the operator ticking them by hand.
+/// eligible phase plus `not_eligible.txt`; this reads them back (merged, see
+/// [`merge_wl_checks`]) so the task modal can pre-select exactly the right
+/// wallets instead of the operator ticking them by hand.
 ///
 /// The per-phase split matters: a wallet allowed in phase 3 is *not* allowed in
 /// phase 4. Returning one merged list would select both groups and send half of
@@ -1573,7 +1579,7 @@ struct WlPhaseSet {
 ///
 /// Returns an empty vec (not an error) when no check has been run for the slug:
 /// that is the normal state for a public mint.
-#[tauri::command]
+#[tauri::command(async)]
 fn load_wl_for_slug(slug: String) -> Result<Vec<WlPhaseSet>, String> {
     // Reuse the mint's own parser so a pasted OpenSea URL resolves identically,
     // then the exporter's sanitizer so the directory name matches byte for byte.
@@ -1584,35 +1590,91 @@ fn load_wl_for_slug(slug: String) -> Result<Vec<WlPhaseSet>, String> {
     let prefix = format!("wl_{}_", minter_core::export::safe_slug(&slug));
 
     let results = runtime_dir("results")?;
-    let mut dirs: Vec<String> = std::fs::read_dir(&results)
+    merge_wl_checks(&results, &prefix)
+}
+
+/// Merge every saved WL check of one slug, newest first.
+///
+/// Each check — one group, a stopped run, a single wallet — writes its own
+/// folder, so reading only the newest one dropped the WL wallets found by the
+/// checks before it (check group A, then group B → only B's wallets were
+/// pre-selected). An address takes its most recent definitive result: phase
+/// files and `not_eligible.txt` decide, `errors.txt` does not, so an older
+/// real result survives a later failed check.
+fn merge_wl_checks(results: &std::path::Path, prefix: &str) -> Result<Vec<WlPhaseSet>, String> {
+    use minter_core::export::{WL_ERRORS_FILE, WL_NOT_ELIGIBLE_FILE};
+    use std::collections::{BTreeMap, BTreeSet, HashSet};
+
+    let mut dirs: Vec<String> = std::fs::read_dir(results)
         .map_err(|e| format!("read results dir: {e}"))?
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
         .map(|e| e.file_name().to_string_lossy().to_string())
-        .filter(|name| name.starts_with(&prefix))
+        .filter(|name| name.starts_with(prefix))
         .collect();
-    if dirs.is_empty() {
-        return Ok(vec![]);
-    }
     // Names end in a zero-padded `YYYYmmdd_HHMMSS`, so lexical order is
-    // chronological and the last entry is the most recent check.
+    // chronological.
     dirs.sort();
-    let dir = results.join(dirs.last().expect("checked non-empty"));
 
-    let mut phases: Vec<WlPhaseSet> = Vec::new();
-    for entry in std::fs::read_dir(&dir).map_err(|e| format!("read wl dir: {e}"))? {
-        let Ok(entry) = entry else { continue };
-        let name = entry.file_name().to_string_lossy().to_string();
-        // Every phase file lists the wallets eligible for that one phase;
-        // `not_eligible.txt` is the complement and must never be selected.
-        if !name.ends_with(".txt") || name == "not_eligible.txt" {
-            continue;
-        }
-        let Ok(content) = std::fs::read_to_string(entry.path()) else {
+    let mut decided: HashSet<String> = HashSet::new();
+    let mut by_stage: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for name in dirs.iter().rev() {
+        let Ok(entries) = std::fs::read_dir(results.join(name)) else {
             continue;
         };
-        let mut addresses: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        for line in content.lines() {
+        let mut stages: Vec<(String, BTreeSet<String>)> = Vec::new();
+        let mut not_eligible = BTreeSet::new();
+        let mut errors = BTreeSet::new();
+        for entry in entries.flatten() {
+            let file = entry.file_name().to_string_lossy().to_string();
+            if !file.ends_with(".txt") {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(entry.path()) else {
+                continue;
+            };
+            let addrs = wl_file_addresses(&content);
+            // Every phase file lists the wallets eligible for that one phase;
+            // `not_eligible.txt` is the complement and must never be selected.
+            match file.as_str() {
+                WL_NOT_ELIGIBLE_FILE => not_eligible = addrs,
+                WL_ERRORS_FILE => errors = addrs,
+                _ => stages.push((file.trim_end_matches(".txt").to_string(), addrs)),
+            }
+        }
+        // Marked only after the whole folder: one wallet can be eligible for
+        // several phases of the same check.
+        let mut decided_here: HashSet<String> = HashSet::new();
+        for (key, addrs) in stages {
+            for a in addrs {
+                if decided.contains(&a) {
+                    continue;
+                }
+                by_stage.entry(key.clone()).or_default().insert(a.clone());
+                decided_here.insert(a);
+            }
+        }
+        for a in not_eligible {
+            if !errors.contains(&a) && !decided.contains(&a) {
+                decided_here.insert(a);
+            }
+        }
+        decided.extend(decided_here);
+    }
+    Ok(by_stage
+        .into_iter()
+        .filter(|(_, addrs)| !addrs.is_empty())
+        .map(|(stage_key, addrs)| WlPhaseSet {
+            stage_key,
+            addresses: addrs.into_iter().collect(),
+        })
+        .collect())
+}
+
+fn wl_file_addresses(content: &str) -> std::collections::BTreeSet<String> {
+    content
+        .lines()
+        .filter_map(|line| {
             // Rows may carry trailing columns (address + detail); take the first
             // whitespace/comma-separated field and keep only real addresses.
             let first = line
@@ -1621,20 +1683,9 @@ fn load_wl_for_slug(slug: String) -> Result<Vec<WlPhaseSet>, String> {
                 .next()
                 .unwrap_or("")
                 .trim();
-            if first.len() == 42 && first.starts_with("0x") {
-                addresses.insert(first.to_lowercase());
-            }
-        }
-        if addresses.is_empty() {
-            continue;
-        }
-        phases.push(WlPhaseSet {
-            stage_key: name.trim_end_matches(".txt").to_string(),
-            addresses: addresses.into_iter().collect(),
-        });
-    }
-    phases.sort_by(|a, b| a.stage_key.cmp(&b.stage_key));
-    Ok(phases)
+            (first.len() == 42 && first.starts_with("0x")).then(|| first.to_lowercase())
+        })
+        .collect()
 }
 
 fn open_folder(p: &std::path::Path) -> Result<(), String> {
@@ -2061,7 +2112,7 @@ async fn multicall(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn clear_auth_cache(state: State<'_, Arc<AppState>>) -> Result<String, String> {
     state
         .session
@@ -2174,22 +2225,36 @@ async fn pick_files(
         .collect())
 }
 
+/// A UI state file next to config.json.
+fn state_file(state: &AppState, name: &str) -> std::path::PathBuf {
+    let dir = state.state_dir.get_or_init(|| {
+        let s = state.session.lock();
+        s.config_path()
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_default()
+    });
+    dir.join(name)
+}
+
 /// wallet_meta.json — groups + proxy map (no private keys).
 fn wallet_meta_path(state: &AppState) -> std::path::PathBuf {
-    let s = state.session.lock();
-    s.config_path()
-        .parent()
-        .map(|p| p.join("wallet_meta.json"))
-        .unwrap_or_else(|| std::path::PathBuf::from("wallet_meta.json"))
+    state_file(state, "wallet_meta.json")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct WalletMetaFile {
     version: u32,
-    /// address → "A" | "B" | "C" | ""
+    /// address → free-form group name ("" / missing = no group)
     #[serde(default)]
     groups: std::collections::HashMap<String, String>,
+    /// Group names in display order, including groups that have no wallets yet.
+    #[serde(default)]
+    group_list: Vec<String>,
+    /// Groups hidden from the wallet lists; "" stands for wallets without a group.
+    #[serde(default)]
+    hidden_groups: Vec<String>,
     /// address → proxy route: -1 = explicit direct, >=0 = proxy list index.
     /// Missing means automatic routing. Signed integers keep existing numeric
     /// wallet_meta.json files backwards-compatible while adding Direct.
@@ -2205,6 +2270,24 @@ struct WalletMetaFile {
     sweep_destination: String,
     #[serde(default)]
     sweep_chain: String,
+}
+
+const WALLET_META_VERSION: u32 = 4;
+
+/// Trim, de-duplicate and bound a webview-supplied list of group names.
+///
+/// `keep_empty` preserves "" — the "no group" bucket in `hidden_groups`.
+fn normalize_group_names(names: &[String], keep_empty: bool) -> Vec<String> {
+    const MAX_GROUPS: usize = 256;
+    const MAX_NAME_CHARS: usize = 64;
+    let mut seen = std::collections::HashSet::new();
+    names
+        .iter()
+        .map(|n| n.trim().chars().take(MAX_NAME_CHARS).collect::<String>())
+        .filter(|n| keep_empty || !n.is_empty())
+        .filter(|n| seen.insert(n.clone()))
+        .take(MAX_GROUPS)
+        .collect()
 }
 
 /// Durably replace `path` with `data`: unique temp → write → fsync → rename,
@@ -2315,31 +2398,23 @@ fn load_wallet_meta(state: State<'_, Arc<AppState>>) -> Result<WalletMetaFile, S
     let path = wallet_meta_path(&state);
     if !path.exists() {
         return Ok(WalletMetaFile {
-            version: 3,
-            groups: Default::default(),
-            proxy_map: Default::default(),
-            selected_addresses: Default::default(),
-            sweep_destination: Default::default(),
-            sweep_chain: Default::default(),
+            version: WALLET_META_VERSION,
+            ..Default::default()
         });
     }
     let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     match serde_json::from_str::<WalletMetaFile>(&raw) {
         Ok(mut f) => {
-            if f.version < 3 {
-                f.version = 3;
+            if f.version < WALLET_META_VERSION {
+                f.version = WALLET_META_VERSION;
             }
             Ok(f)
         }
         Err(e) => {
             backup_corrupt_file(&path, "wallet_meta.json", &e);
             Ok(WalletMetaFile {
-                version: 3,
-                groups: Default::default(),
-                proxy_map: Default::default(),
-                selected_addresses: Default::default(),
-                sweep_destination: Default::default(),
-                sweep_chain: Default::default(),
+                version: WALLET_META_VERSION,
+                ..Default::default()
             })
         }
     }
@@ -2349,9 +2424,11 @@ fn load_wallet_meta(state: State<'_, Arc<AppState>>) -> Result<WalletMetaFile, S
 fn save_wallet_meta(state: State<'_, Arc<AppState>>, file: WalletMetaFile) -> Result<(), String> {
     let path = wallet_meta_path(&state);
     let mut out = file;
-    out.version = 3;
+    out.version = WALLET_META_VERSION;
     // Only -1 and real proxy indices are valid persisted routes.
     out.proxy_map.retain(|_, route| *route >= -1);
+    out.group_list = normalize_group_names(&out.group_list, false);
+    out.hidden_groups = normalize_group_names(&out.hidden_groups, true);
     // Public addresses only. Bound and normalize the operator-controlled UI
     // state so a compromised WebView cannot grow this file without limit.
     out.selected_addresses = canonical_wallet_addresses(&out.selected_addresses);
@@ -2406,11 +2483,7 @@ async fn read_text_file(state: State<'_, Arc<AppState>>, token: String) -> Resul
 
 /// tasks.json next to config.json (no secrets — addresses + params only).
 fn tasks_path(state: &AppState) -> std::path::PathBuf {
-    let s = state.session.lock();
-    s.config_path()
-        .parent()
-        .map(|p| p.join("tasks.json"))
-        .unwrap_or_else(|| std::path::PathBuf::from("tasks.json"))
+    state_file(state, "tasks.json")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -2460,11 +2533,7 @@ fn save_tasks(state: State<'_, Arc<AppState>>, file: TasksFile) -> Result<(), St
 
 /// runs_history.json — mint run summaries (no private keys).
 fn runs_history_path(state: &AppState) -> std::path::PathBuf {
-    let s = state.session.lock();
-    s.config_path()
-        .parent()
-        .map(|p| p.join("runs_history.json"))
-        .unwrap_or_else(|| std::path::PathBuf::from("runs_history.json"))
+    state_file(state, "runs_history.json")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -2926,6 +2995,7 @@ mod tests {
             selected_addresses: vec!["0xDEF".into(), "0xabc".into()],
             sweep_destination: "0x123".into(),
             sweep_chain: "robinhood".into(),
+            ..Default::default()
         };
         let json = serde_json::to_string(&upgraded).unwrap();
         let decoded: WalletMetaFile = serde_json::from_str(&json).unwrap();
@@ -2934,6 +3004,138 @@ mod tests {
         assert_eq!(decoded.selected_addresses.len(), 2);
         assert_eq!(decoded.sweep_destination, "0x123");
         assert_eq!(decoded.sweep_chain, "robinhood");
+    }
+
+    #[test]
+    fn wallet_meta_v3_file_loads_without_group_list_or_hidden_groups() {
+        let old: WalletMetaFile = serde_json::from_str(
+            r#"{"version":3,"groups":{"0xabc":"A"},"proxyMap":{},"selectedAddresses":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(old.groups.get("0xabc").map(String::as_str), Some("A"));
+        assert!(old.group_list.is_empty());
+        assert!(old.hidden_groups.is_empty());
+    }
+
+    fn addr(c: char) -> String {
+        format!("0x{}", c.to_string().repeat(40))
+    }
+
+    fn write_check(root: &std::path::Path, folder: &str, files: &[(&str, Vec<String>)]) {
+        let dir = root.join(folder);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, addrs) in files {
+            let body: String = addrs.iter().map(|a| format!("{a}\n")).collect();
+            std::fs::write(dir.join(name), body).unwrap();
+        }
+    }
+
+    #[test]
+    fn wl_checks_of_different_groups_are_merged_newest_result_first() {
+        let root = std::env::temp_dir().join(format!(
+            "minter_wl_merge_{}_{}",
+            std::process::id(),
+            now_unix()
+        ));
+        let (a, b, c, d, e) = (addr('a'), addr('b'), addr('c'), addr('d'), addr('e'));
+        // Group 1: a, b eligible for phase 0, c not.
+        write_check(
+            &root,
+            "wl_drop_20260101_000000",
+            &[
+                ("SIGNED_PRESALE#0.txt", vec![a.clone(), b.clone()]),
+                ("not_eligible.txt", vec![c.clone()]),
+            ],
+        );
+        // Group 2: d eligible; b's re-check failed (must not erase its result).
+        write_check(
+            &root,
+            "wl_drop_20260102_000000",
+            &[
+                ("SIGNED_PRESALE#0.txt", vec![d.clone()]),
+                ("not_eligible.txt", vec![e.clone(), b.clone()]),
+                ("errors.txt", vec![b.clone()]),
+            ],
+        );
+        // Newest: c became eligible for phase 1, a is no longer eligible.
+        write_check(
+            &root,
+            "wl_drop_20260103_000000",
+            &[
+                ("SIGNED_PRESALE#1.txt", vec![c.clone()]),
+                ("not_eligible.txt", vec![a.clone()]),
+            ],
+        );
+        // Another collection whose slug shares a prefix must be ignored.
+        write_check(
+            &root,
+            "wl_dropx_20260104_000000",
+            &[("SIGNED_PRESALE#0.txt", vec![e.clone()])],
+        );
+
+        let phases = merge_wl_checks(&root, "wl_drop_").unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        let got: Vec<(String, Vec<String>)> = phases
+            .into_iter()
+            .map(|p| (p.stage_key, p.addresses))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("SIGNED_PRESALE#0".to_string(), vec![b, d]),
+                ("SIGNED_PRESALE#1".to_string(), vec![c]),
+            ]
+        );
+    }
+
+    #[test]
+    fn wl_merge_without_any_check_is_empty() {
+        let root = std::env::temp_dir().join(format!(
+            "minter_wl_empty_{}_{}",
+            std::process::id(),
+            now_unix()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let phases = merge_wl_checks(&root, "wl_nothing_").unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(phases.is_empty());
+    }
+
+    #[test]
+    fn wallet_meta_roundtrips_group_list_and_hidden_groups() {
+        let file = WalletMetaFile {
+            version: WALLET_META_VERSION,
+            group_list: vec!["main".into(), "farm".into()],
+            hidden_groups: vec!["farm".into(), String::new()],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&file).unwrap();
+        assert!(json.contains("\"groupList\"") && json.contains("\"hiddenGroups\""));
+        let decoded: WalletMetaFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.group_list, vec!["main", "farm"]);
+        assert_eq!(decoded.hidden_groups, vec!["farm", ""]);
+    }
+
+    #[test]
+    fn group_names_are_trimmed_deduplicated_and_bounded() {
+        let names = vec![
+            " main ".to_string(),
+            "main".to_string(),
+            String::new(),
+            "x".repeat(100),
+        ];
+        let listed = normalize_group_names(&names, false);
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0], "main");
+        assert_eq!(listed[1].chars().count(), 64);
+
+        // "" is the "no group" bucket and must survive in the hidden list.
+        let hidden = normalize_group_names(&names, true);
+        assert_eq!(hidden.len(), 3);
+        assert_eq!(hidden[1], "");
+
+        let many: Vec<String> = (0..1000).map(|i| format!("g{i}")).collect();
+        assert_eq!(normalize_group_names(&many, false).len(), 256);
     }
 
     #[test]
