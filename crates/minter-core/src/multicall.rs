@@ -34,6 +34,70 @@ sol! {
     }
 
     function aggregate3Value(Call3Value[] calls) external payable returns (CallResult[] memory returnData);
+
+    struct Call3 {
+        address target;
+        bool allowFailure;
+        bytes callData;
+    }
+
+    function aggregate3(Call3[] calls) external payable returns (CallResult[] memory returnData);
+
+    function getEthBalance(address addr) external view returns (uint256 balance);
+}
+
+/// Addresses per `aggregate3` read when fetching balances.
+const BALANCE_CHUNK: usize = 200;
+
+/// Native balances via Multicall3 `getEthBalance`: one `eth_call` per
+/// [`BALANCE_CHUNK`] addresses instead of one request (and one rate-limit
+/// unit) per wallet.
+///
+/// Errors when a batch cannot be answered — no Multicall3 on the chain, RPC
+/// failure, malformed reply — so the caller can fall back to `eth_getBalance`.
+pub async fn eth_balances(rpc: &RpcClient, addrs: &[Address]) -> anyhow::Result<Vec<U256>> {
+    let mut out = Vec::with_capacity(addrs.len());
+    for chunk in addrs.chunks(BALANCE_CHUNK) {
+        let raw = rpc
+            .eth_call(&Address::ZERO, &MULTICALL3, &balance_batch_calldata(chunk))
+            .await
+            .context("Multicall3 getEthBalance batch")?;
+        out.extend(decode_balance_batch(&raw, chunk.len())?);
+    }
+    Ok(out)
+}
+
+fn balance_batch_calldata(addrs: &[Address]) -> Bytes {
+    let calls = addrs
+        .iter()
+        .map(|a| Call3 {
+            target: MULTICALL3,
+            allowFailure: false,
+            callData: getEthBalanceCall { addr: *a }.abi_encode().into(),
+        })
+        .collect();
+    aggregate3Call { calls }.abi_encode().into()
+}
+
+fn decode_balance_batch(raw: &[u8], expected: usize) -> anyhow::Result<Vec<U256>> {
+    // An address without code answers `0x`, which fails to decode here.
+    let results = aggregate3Call::abi_decode_returns(raw).context("decode aggregate3 reply")?;
+    if results.len() != expected {
+        bail!(
+            "Multicall3 returned {} results for {} balance calls",
+            results.len(),
+            expected
+        );
+    }
+    results
+        .into_iter()
+        .map(|r| {
+            if !r.success {
+                bail!("Multicall3 getEthBalance call failed");
+            }
+            getEthBalanceCall::abi_decode_returns(&r.returnData).context("decode getEthBalance")
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -490,6 +554,48 @@ mod tests {
             format!("{:?}", MULTICALL3).to_lowercase(),
             "0xca11bde05977b3631167028862be2a173976ca11"
         );
+    }
+
+    #[test]
+    fn balance_batch_targets_multicall3_get_eth_balance() {
+        let a = alloy_primitives::address!("0x00000000000000000000000000000000000000aa");
+        let data = balance_batch_calldata(&[a]);
+        assert_eq!(&data.as_ref()[..4], aggregate3Call::SELECTOR.as_slice());
+        let decoded = aggregate3Call::abi_decode(&data).unwrap();
+        assert_eq!(decoded.calls.len(), 1);
+        assert_eq!(decoded.calls[0].target, MULTICALL3);
+        let inner = getEthBalanceCall::abi_decode(&decoded.calls[0].callData).unwrap();
+        assert_eq!(inner.addr, a);
+    }
+
+    #[test]
+    fn balance_batch_reply_decodes_in_order() {
+        let reply = aggregate3Call::abi_encode_returns(&vec![
+            CallResult {
+                success: true,
+                returnData: getEthBalanceCall::abi_encode_returns(&U256::from(7u64)).into(),
+            },
+            CallResult {
+                success: true,
+                returnData: getEthBalanceCall::abi_encode_returns(&U256::ZERO).into(),
+            },
+        ]);
+        assert_eq!(
+            decode_balance_batch(&reply, 2).unwrap(),
+            vec![U256::from(7u64), U256::ZERO]
+        );
+        assert!(decode_balance_batch(&reply, 3).is_err(), "count mismatch");
+    }
+
+    #[test]
+    fn balance_batch_without_multicall3_is_an_error_not_zero_balances() {
+        // eth_call to an address with no code returns empty data.
+        assert!(decode_balance_batch(&[], 1).is_err());
+        let failed = aggregate3Call::abi_encode_returns(&vec![CallResult {
+            success: false,
+            returnData: Bytes::new(),
+        }]);
+        assert!(decode_balance_batch(&failed, 1).is_err());
     }
 }
 

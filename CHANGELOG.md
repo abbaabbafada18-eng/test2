@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Wallet groups manager on the Wallets page: create (empty or from the
+  selection), rename, delete, select a whole group, "Move to group…" in the
+  bulk bar, a "No group" filter. Group order and empty groups persist in
+  `wallet_meta.json` (version 4, older files load unchanged).
+- Hidden groups: hide a group (or the ungrouped wallets) from the wallet table
+  and the WL Check picker, with a "Show hidden (N)" toggle. A hidden wallet is
+  never left selected, so bulk Delete / Withdraw cannot touch it unseen.
+- WL Check: pick wallets by group — one chip per group toggles the whole group
+  and shows `selected/total`; a selected-count line above the list.
+
+### Changed
+
+- Faster: wallet balances are read through Multicall3 (one `eth_call` per 200
+  wallets, bounded parallel `eth_getBalance` where Multicall3 is missing)
+  instead of one sequential request per wallet.
+- Faster: Raw Mint (public, live) broadcasts every wallet in parallel and waits
+  for receipts in parallel; it used to wait for each wallet's receipt before
+  sending the next one.
+- Faster: receipt lookups ask every RPC node at once (same "absent only if all
+  nodes answer null" rule), with a per-call timeout instead of 30s on a hung node.
+- Faster: WL Check staggers only the first wave of workers; every wallet used
+  to sleep up to (threads−1)×250ms inside its slot.
+- The window no longer freezes on status / wallet-list / settings reads while a
+  vault operation holds the session (these commands run off the main thread),
+  and UI state files no longer wait on that lock.
+- Release builds use thin LTO and a single codegen unit.
+
+### Fixed
+
+- WL auto-load in the task window merges every saved check of the collection
+  (newest result per wallet) instead of reading only the latest folder, so
+  checking groups one after another keeps all eligible wallets. Failed checks
+  are also written to `errors.txt` and never override an earlier real result.
+- `results/`, `logs/` and `auth_cache.bin` now live in the data folder (next to
+  the vault) instead of the working directory, so WL auto-load and the auth
+  cache work however the app is launched.
+
 ## [1.2.1] - 2026-08-31
 
 ### Fixed

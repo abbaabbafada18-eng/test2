@@ -132,6 +132,10 @@ pub struct FileTeeReporter {
 
 impl FileTeeReporter {
     pub fn create(inner: std::sync::Arc<dyn MintReporter>, slug: &str) -> std::io::Result<Self> {
+        // The folder "Open logs folder" shows, whatever the cwd.
+        #[cfg(not(test))]
+        let dir = crate::paths::data_file("logs");
+        #[cfg(test)]
         let dir = std::path::PathBuf::from("logs");
         std::fs::create_dir_all(&dir)?;
         let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");

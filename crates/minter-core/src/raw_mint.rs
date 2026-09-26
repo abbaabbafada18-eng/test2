@@ -631,112 +631,7 @@ pub async fn run_raw_mint(
 
     // —— Public live: send each ——
     if !config.use_flashbots {
-        let mut results = Vec::new();
-        for (addr, piece, row) in prepared {
-            let Some(piece) = piece else {
-                results.push(row);
-                continue;
-            };
-            if config.dry_run {
-                results.push(MintResult {
-                    address: addr,
-                    tx_hash: None,
-                    status: WalletStatus::DryRunOk,
-                    gas_used: row.gas_used,
-                    block_number: None,
-                    error: None,
-                });
-                continue;
-            }
-            crate::rprint!("  Sending...");
-            let tx_hash = match rpc.race_send(&piece.raw).await {
-                Ok(h) => {
-                    crate::rlog!(" OK {}", shorten_hash(&h));
-                    h
-                }
-                Err(e) => {
-                    // A send error is NOT proof the tx never entered a pool — with
-                    // one endpoint a lost response/timeout looks identical to a
-                    // rejection, and "already known" errors on a live tx. Only
-                    // provably-rejected errors are a real failure; anything
-                    // ambiguous keeps its precomputed hash and is reconciled
-                    // against the chain below (the sniper path guards this the same
-                    // way). Reporting Failed with no hash would discard the one
-                    // thing needed to verify → a mined mint reported as a loss and
-                    // a double mint on retry.
-                    match crate::errors::classify_send_failure(&e.to_string()) {
-                        crate::errors::SendOutcome::Rejected => {
-                            crate::rlog!(" REJECTED: {}", e);
-                            results.push(MintResult {
-                                address: addr,
-                                tx_hash: None,
-                                status: WalletStatus::Failed,
-                                gas_used: None,
-                                block_number: None,
-                                error: Some(format!("send: {e}")),
-                            });
-                            continue;
-                        }
-                        // Accepted (node already has it) OR Ambiguous (unclear):
-                        // the tx may well be live, so keep its precomputed hash and
-                        // reconcile against the chain instead of calling it a loss.
-                        crate::errors::SendOutcome::Accepted
-                        | crate::errors::SendOutcome::Ambiguous => {
-                            crate::rlog!(
-                                " send unconfirmed ({}) — verifying {}",
-                                e,
-                                shorten_hash(&piece.tx_hash)
-                            );
-                            piece.tx_hash
-                        }
-                    }
-                }
-            };
-            crate::rprint!("  Receipt...");
-            match rpc.wait_for_receipt(&tx_hash, 120).await {
-                Ok(receipt) => {
-                    let info = crate::rpc::parse_receipt(&receipt);
-                    if info.success {
-                        crate::rlog!(
-                            " CONFIRMED block={} gas={}",
-                            info.block_number,
-                            info.gas_used
-                        );
-                        results.push(MintResult {
-                            address: addr,
-                            tx_hash: Some(tx_hash),
-                            status: WalletStatus::Confirmed,
-                            gas_used: Some(info.gas_used),
-                            block_number: Some(info.block_number),
-                            error: None,
-                        });
-                    } else {
-                        crate::rlog!(" REVERTED block={}", info.block_number);
-                        results.push(MintResult {
-                            address: addr,
-                            tx_hash: Some(tx_hash),
-                            status: WalletStatus::Failed,
-                            gas_used: Some(info.gas_used),
-                            block_number: Some(info.block_number),
-                            error: Some("reverted".to_string()),
-                        });
-                    }
-                }
-                Err(e) => {
-                    crate::rlog!(" timeout: {}", e);
-                    results.push(MintResult {
-                        address: addr,
-                        tx_hash: Some(tx_hash),
-                        status: WalletStatus::Sent,
-                        gas_used: None,
-                        block_number: None,
-                        error: Some(format!("receipt: {e}")),
-                    });
-                }
-            }
-            let _ = row;
-        }
-        return results;
+        return send_public(rpc, prepared, config.dry_run).await;
     }
 
     // —— Flashbots live ——
@@ -867,4 +762,272 @@ pub async fn run_raw_mint(
         }
     }
     results
+}
+
+/// Wallets sending at most at once in the public live path (each send fans
+/// out to several RPCs).
+const PUBLIC_SEND_IN_FLIGHT: usize = 32;
+
+/// Broadcast every prepared wallet in parallel, then wait for the receipts in
+/// parallel. Each wallet has its own nonce, so nothing orders them — the old
+/// loop waited for one wallet's receipt (a block or more) before the next
+/// wallet could even send. Results keep the `prepared` order.
+async fn send_public(
+    rpc: &RpcClient,
+    prepared: Vec<(Address, Option<BundleTx>, MintResult)>,
+    dry_run: bool,
+) -> Vec<MintResult> {
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(PUBLIC_SEND_IN_FLIGHT));
+    let mut results: Vec<Option<MintResult>> = Vec::with_capacity(prepared.len());
+    // Enough to report a wallet whose task died: never drop a row, and keep the
+    // signed hash so the operator can still verify it on an explorer.
+    let mut fallback: Vec<(Address, Option<alloy_primitives::B256>)> = Vec::new();
+    let mut set = tokio::task::JoinSet::new();
+    for (i, (addr, piece, row)) in prepared.into_iter().enumerate() {
+        fallback.push((addr, piece.as_ref().map(|p| p.tx_hash)));
+        let Some(piece) = piece else {
+            results.push(Some(row));
+            continue;
+        };
+        if dry_run {
+            results.push(Some(MintResult {
+                address: addr,
+                tx_hash: None,
+                status: WalletStatus::DryRunOk,
+                gas_used: row.gas_used,
+                block_number: None,
+                error: None,
+            }));
+            continue;
+        }
+        results.push(None);
+        let rpc = rpc.clone();
+        let sem = sem.clone();
+        set.spawn(async move { (i, send_and_confirm(&rpc, &sem, addr, piece).await) });
+    }
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok((i, row)) => results[i] = Some(row),
+            Err(e) => crate::rlog!("raw mint wallet task failed: {e}"),
+        }
+    }
+    results
+        .into_iter()
+        .zip(fallback)
+        .map(|(row, (address, hash))| {
+            row.unwrap_or_else(|| MintResult {
+                address,
+                tx_hash: hash,
+                status: WalletStatus::Sent,
+                gas_used: None,
+                block_number: None,
+                error: Some("send task failed — verify the tx hash on an explorer".into()),
+            })
+        })
+        .collect()
+}
+
+async fn send_and_confirm(
+    rpc: &RpcClient,
+    sem: &std::sync::Arc<tokio::sync::Semaphore>,
+    addr: Address,
+    piece: BundleTx,
+) -> MintResult {
+    let who = shorten_address(&addr);
+    // The permit covers only the broadcast; waiting for a receipt must not
+    // keep later wallets from sending.
+    let permit = sem.clone().acquire_owned().await;
+    let sent = rpc.race_send(&piece.raw).await;
+    drop(permit);
+    let tx_hash = match sent {
+        Ok(h) => {
+            crate::rlog!("  {who} sent {}", shorten_hash(&h));
+            h
+        }
+        Err(e) => {
+            // A send error is NOT proof the tx never entered a pool — with
+            // one endpoint a lost response/timeout looks identical to a
+            // rejection, and "already known" errors on a live tx. Only
+            // provably-rejected errors are a real failure; anything
+            // ambiguous keeps its precomputed hash and is reconciled
+            // against the chain below (the sniper path guards this the same
+            // way). Reporting Failed with no hash would discard the one
+            // thing needed to verify → a mined mint reported as a loss and
+            // a double mint on retry.
+            match crate::errors::classify_send_failure(&e.to_string()) {
+                crate::errors::SendOutcome::Rejected => {
+                    crate::rlog!("  {who} REJECTED: {e}");
+                    return MintResult {
+                        address: addr,
+                        tx_hash: None,
+                        status: WalletStatus::Failed,
+                        gas_used: None,
+                        block_number: None,
+                        error: Some(format!("send: {e}")),
+                    };
+                }
+                // Accepted (node already has it) OR Ambiguous (unclear):
+                // the tx may well be live, so keep its precomputed hash and
+                // reconcile against the chain instead of calling it a loss.
+                crate::errors::SendOutcome::Accepted | crate::errors::SendOutcome::Ambiguous => {
+                    crate::rlog!(
+                        "  {who} send unconfirmed ({e}) — verifying {}",
+                        shorten_hash(&piece.tx_hash)
+                    );
+                    piece.tx_hash
+                }
+            }
+        }
+    };
+    match rpc.wait_for_receipt(&tx_hash, 120).await {
+        Ok(receipt) => {
+            let info = crate::rpc::parse_receipt(&receipt);
+            if info.success {
+                crate::rlog!(
+                    "  {who} CONFIRMED block={} gas={}",
+                    info.block_number,
+                    info.gas_used
+                );
+                MintResult {
+                    address: addr,
+                    tx_hash: Some(tx_hash),
+                    status: WalletStatus::Confirmed,
+                    gas_used: Some(info.gas_used),
+                    block_number: Some(info.block_number),
+                    error: None,
+                }
+            } else {
+                crate::rlog!("  {who} REVERTED block={}", info.block_number);
+                MintResult {
+                    address: addr,
+                    tx_hash: Some(tx_hash),
+                    status: WalletStatus::Failed,
+                    gas_used: Some(info.gas_used),
+                    block_number: Some(info.block_number),
+                    error: Some("reverted".to_string()),
+                }
+            }
+        }
+        Err(e) => {
+            crate::rlog!("  {who} receipt timeout: {e}");
+            MintResult {
+                address: addr,
+                tx_hash: Some(tx_hash),
+                status: WalletStatus::Sent,
+                gas_used: None,
+                block_number: None,
+                error: Some(format!("receipt: {e}")),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod send_public_tests {
+    use super::*;
+    use alloy_primitives::{B256, Bytes};
+    use std::time::{Duration, Instant};
+
+    /// JSON-RPC stub: `eth_sendRawTransaction` answers `send_result`, anything
+    /// else a successful receipt. Every reply is delayed by `delay`.
+    fn spawn_rpc(send_result: &'static str, delay: Duration) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 16 * 1024];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    tokio::time::sleep(delay).await;
+                    let body = if req.contains("eth_sendRawTransaction") {
+                        send_result.to_string()
+                    } else {
+                        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"status\":\"0x1\",\
+                         \"gasUsed\":\"0x5208\",\"blockNumber\":\"0x10\"}}"
+                            .to_string()
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.flush().await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn wallet(i: u8) -> (Address, Option<BundleTx>, MintResult) {
+        let addr = Address::from([i; 20]);
+        let piece = BundleTx {
+            from: addr,
+            raw: Bytes::from(vec![0x02, i]),
+            tx_hash: B256::from([i; 32]),
+        };
+        let row = MintResult {
+            address: addr,
+            tx_hash: None,
+            status: WalletStatus::Wait,
+            gas_used: Some(21_000),
+            block_number: None,
+            error: None,
+        };
+        (addr, Some(piece), row)
+    }
+
+    #[tokio::test]
+    async fn wallets_are_sent_and_confirmed_in_parallel_in_order() {
+        let hash = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x0101010101010101010101010101010101010101010101010101010101010101\"}";
+        let rpc = RpcClient::new(vec![spawn_rpc(hash, Duration::from_millis(400))]);
+        let prepared: Vec<_> = (1..=6).map(wallet).collect();
+        let started = Instant::now();
+        let out = send_public(&rpc, prepared, false).await;
+        // Serial: 6 × (send + receipt) ≥ 4.8s. Parallel: about one round of each.
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(out.len(), 6);
+        for (i, r) in out.iter().enumerate() {
+            assert_eq!(r.address, Address::from([i as u8 + 1; 20]));
+            assert!(
+                matches!(r.status, WalletStatus::Confirmed),
+                "{:?}",
+                r.status
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_ambiguous_send_error_keeps_the_signed_hash_for_reconciliation() {
+        // A rate limit is not proof of rejection: the precomputed hash must be
+        // kept and checked against the chain (the stub then finds a receipt).
+        let limited = "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":429,\"message\":\"Too Many Requests\"}}";
+        let rpc = RpcClient::new(vec![spawn_rpc(limited, Duration::ZERO)]);
+        let out = send_public(&rpc, vec![wallet(9)], false).await;
+        assert_eq!(out[0].tx_hash, Some(B256::from([9u8; 32])));
+        assert!(
+            matches!(out[0].status, WalletStatus::Confirmed),
+            "{:?}",
+            out[0].status
+        );
+    }
+
+    #[tokio::test]
+    async fn dry_run_and_unprepared_wallets_never_touch_the_network() {
+        let mut unprepared = wallet(3);
+        unprepared.1 = None;
+        unprepared.2.status = WalletStatus::Failed;
+        let rpc = RpcClient::new(vec!["http://127.0.0.1:9".into()]);
+        let out = send_public(&rpc, vec![wallet(2), unprepared], true).await;
+        assert!(matches!(out[0].status, WalletStatus::DryRunOk));
+        assert!(matches!(out[1].status, WalletStatus::Failed));
+    }
 }

@@ -676,46 +676,36 @@ impl Session {
                 .collect();
             if set.is_empty() { None } else { Some(set) }
         });
-        let mut rows = Vec::new();
-        for s in &self.signers {
-            let addr = s.address();
-            let addr_s = format!("{:?}", addr);
-            if let Some(ref f) = filter {
-                if !f.contains(&normalize_address(&addr_s)) {
-                    continue;
-                }
-            }
-            let chain_label = chain
-                .map(str::trim)
-                .filter(|c| !c.is_empty())
-                .map(|c| c.to_string());
-            match rpc.balance(&addr).await {
-                Ok(wei) => {
-                    let eth = amount::wei_to_eth_string(wei);
-                    // "funded enough for gas+dust" — UI may raise threshold
-                    let ok = wei > U256::from(10_000_000_000_000u64); // > 0.00001 ETH
-                    rows.push(WalletBalanceRow {
-                        address: addr_s,
-                        balance_eth: eth,
-                        balance_wei: wei.to_string(),
-                        ok,
-                        error: None,
-                        chain: chain_label.clone(),
-                    });
-                }
+        let chain_label = chain
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(|c| c.to_string());
+        let addrs: Vec<alloy_primitives::Address> = self
+            .signers
+            .iter()
+            .map(|s| s.address())
+            .filter(|a| {
+                filter
+                    .as_ref()
+                    .is_none_or(|f| f.contains(&normalize_address(&format!("{a:?}"))))
+            })
+            .collect();
+        // One Multicall3 read per 200 wallets. It used to be one sequential
+        // request per wallet: minutes for a few hundred, far longer when the
+        // first node hung for its full timeout on every wallet.
+        let balances: Vec<std::result::Result<U256, String>> =
+            match multicall::eth_balances(&rpc, &addrs).await {
+                Ok(v) => v.into_iter().map(Ok).collect(),
                 Err(e) => {
-                    rows.push(WalletBalanceRow {
-                        address: addr_s,
-                        balance_eth: "—".into(),
-                        balance_wei: "0".into(),
-                        ok: false,
-                        error: Some(e.to_string()),
-                        chain: chain_label.clone(),
-                    });
+                    crate::rlog!("balance batch unavailable ({e:#}) — querying wallets one by one");
+                    balances_one_by_one(&rpc, &addrs).await
                 }
-            }
-        }
-        Ok(rows)
+            };
+        Ok(addrs
+            .iter()
+            .zip(balances)
+            .map(|(addr, bal)| balance_row(addr, bal, &chain_label))
+            .collect())
     }
 
     pub fn remove_wallet(&mut self, address: &str) -> Result<()> {
@@ -1686,8 +1676,15 @@ impl Session {
             let sem = sem.clone();
             let cache = cache.clone();
             let slug = slug_owned.clone();
-            // Mild stagger so concurrent workers don't open SIWE in lockstep.
-            let stagger_ms = (ord as u64 % conc as u64) * 250;
+            // Stagger only the first wave so workers don't open SIWE in lockstep.
+            // Sleeping inside the slot for every wallet cost each one up to
+            // (threads-1)×250ms, so 16 threads behaved like about four; later
+            // wallets are already spread out by waiting for a free slot.
+            let stagger_ms = if (ord as u64) < conc as u64 {
+                ord as u64 * 250
+            } else {
+                0
+            };
             let cancel_w = cancel.clone();
             set.spawn(async move {
                 let _permit = match sem.acquire().await {
@@ -2998,10 +2995,14 @@ fn export_wl_report(
     let mut csv_rows: Vec<WlCsvRow> = Vec::new();
     let mut by_stage: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut not_eligible: Vec<String> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
 
     for w in wallets {
         if !w.ok {
+            // Kept in not_eligible.txt as before; errors.txt lets WL auto-load
+            // fall back to an earlier check instead of trusting a failure.
             not_eligible.push(w.address.clone());
+            errors.push(w.address.clone());
             continue;
         }
         let mut has_wl = false;
@@ -3029,7 +3030,60 @@ fn export_wl_report(
     }
 
     let stage_wallets: Vec<(String, Vec<String>)> = by_stage.into_iter().collect();
-    write_wl_eligibility_export(slug, &csv_rows, &stage_wallets, &not_eligible)
+    write_wl_eligibility_export(slug, &csv_rows, &stage_wallets, &not_eligible, &errors)
+}
+
+/// Per-wallet `eth_getBalance` for chains without Multicall3: a bounded number
+/// in flight, results in input order.
+async fn balances_one_by_one(
+    rpc: &RpcClient,
+    addrs: &[alloy_primitives::Address],
+) -> Vec<std::result::Result<U256, String>> {
+    const IN_FLIGHT: usize = 8;
+    let sem = Arc::new(tokio::sync::Semaphore::new(IN_FLIGHT));
+    let mut set = tokio::task::JoinSet::new();
+    for (i, addr) in addrs.iter().copied().enumerate() {
+        let rpc = rpc.clone();
+        let sem = sem.clone();
+        set.spawn(async move {
+            let _permit = sem.acquire_owned().await;
+            (i, rpc.balance(&addr).await.map_err(|e| e.to_string()))
+        });
+    }
+    let mut out = vec![Err("balance lookup did not finish".to_string()); addrs.len()];
+    while let Some(joined) = set.join_next().await {
+        if let Ok((i, res)) = joined {
+            out[i] = res;
+        }
+    }
+    out
+}
+
+fn balance_row(
+    addr: &alloy_primitives::Address,
+    balance: std::result::Result<U256, String>,
+    chain: &Option<String>,
+) -> WalletBalanceRow {
+    let address = format!("{addr:?}");
+    match balance {
+        Ok(wei) => WalletBalanceRow {
+            address,
+            balance_eth: amount::wei_to_eth_string(wei),
+            balance_wei: wei.to_string(),
+            // "funded enough for gas+dust" — UI may raise threshold
+            ok: wei > U256::from(10_000_000_000_000u64), // > 0.00001 ETH
+            error: None,
+            chain: chain.clone(),
+        },
+        Err(e) => WalletBalanceRow {
+            address,
+            balance_eth: "—".into(),
+            balance_wei: "0".into(),
+            ok: false,
+            error: Some(e),
+            chain: chain.clone(),
+        },
+    }
 }
 
 #[cfg(test)]

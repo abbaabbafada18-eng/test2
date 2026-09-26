@@ -77,7 +77,13 @@ pub struct AuthCache {
 
 impl AuthCache {
     pub fn load(password: Option<&str>) -> Self {
-        Self::load_at(PathBuf::from(CACHE_FILE), password)
+        // Next to the vault, not in the cwd: a launch from another folder used to
+        // start with an empty cache and re-sign SIWE for every wallet.
+        #[cfg(not(test))]
+        let path = crate::paths::data_file(CACHE_FILE);
+        #[cfg(test)]
+        let path = PathBuf::from(CACHE_FILE);
+        Self::load_at(path, password)
     }
 
     /// Load from an explicit path (tests / alternate data dirs).

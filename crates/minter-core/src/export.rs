@@ -56,7 +56,17 @@ pub fn wallet_row(
 }
 
 fn results_dir() -> PathBuf {
-    PathBuf::from("results")
+    // Same folder the desktop reads WL checks back from (and opens with "Open
+    // results folder"). A cwd-relative path diverged from it whenever the app
+    // was started from elsewhere, and WL auto-load then found nothing.
+    #[cfg(not(test))]
+    {
+        crate::paths::data_file("results")
+    }
+    #[cfg(test)]
+    {
+        PathBuf::from("results")
+    }
 }
 
 /// Sanitize a collection slug for use in a file/directory name.
@@ -150,6 +160,8 @@ pub struct WlExportPaths {
     pub dir: PathBuf,
     pub csv: PathBuf,
     pub not_eligible: PathBuf,
+    /// Wallets whose check failed (also listed in `not_eligible.txt`).
+    pub errors: PathBuf,
     /// Stage key → path (e.g. `SIGNED_PRESALE#0.txt`)
     pub stage_files: Vec<(String, PathBuf)>,
 }
@@ -173,6 +185,8 @@ pub fn wl_stage_file_key(stage_type: &str, stage_index: Option<i64>) -> String {
 /// - `eligibility.csv` — address,stage,max_mint (WL eligible only, **no PUBLIC_SALE**)
 /// - one `{STAGE}.txt` per WL phase (addresses)
 /// - `not_eligible.txt` — wallets with no WL-eligible phase (public-only / none / errors)
+/// - `errors.txt` — the subset of `not_eligible.txt` whose check failed, so a
+///   later merge of several checks never lets an error hide a real result
 ///
 /// `stage_wallets`: stage_key → addresses (e.g. SIGNED_PRESALE#0).
 pub fn write_wl_eligibility_export(
@@ -180,6 +194,7 @@ pub fn write_wl_eligibility_export(
     csv_rows: &[WlCsvRow],
     stage_wallets: &[(String, Vec<String>)],
     not_eligible: &[String],
+    errors: &[String],
 ) -> Result<WlExportPaths> {
     let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
     let dir = results_dir().join(format!("wl_{}_{}", safe_slug(slug), ts));
@@ -220,13 +235,27 @@ pub fn write_wl_eligibility_export(
     }
     std::fs::write(&not_path, not_body).with_context(|| format!("write {}", not_path.display()))?;
 
+    let errors_path = dir.join(WL_ERRORS_FILE);
+    let mut errors_body = String::new();
+    for a in errors {
+        errors_body.push_str(a.trim());
+        errors_body.push('\n');
+    }
+    std::fs::write(&errors_path, errors_body)
+        .with_context(|| format!("write {}", errors_path.display()))?;
+
     Ok(WlExportPaths {
         dir,
         csv: csv_path,
         not_eligible: not_path,
+        errors: errors_path,
         stage_files,
     })
 }
+
+/// File names inside a `wl_{slug}_{ts}` folder that are not WL phases.
+pub const WL_NOT_ELIGIBLE_FILE: &str = "not_eligible.txt";
+pub const WL_ERRORS_FILE: &str = "errors.txt";
 
 #[cfg(test)]
 mod wl_export_tests {
@@ -261,8 +290,9 @@ mod wl_export_tests {
             max_mint: "2".into(),
         }];
         let stages = vec![("SIGNED_PRESALE#0".into(), vec!["0xabc".into()])];
-        let not_elig = vec!["0xdef".into()];
-        let out = write_wl_eligibility_export(&slug, &rows, &stages, &not_elig).unwrap();
+        let not_elig = vec!["0xdef".into(), "0xbad".into()];
+        let errors = vec!["0xbad".into()];
+        let out = write_wl_eligibility_export(&slug, &rows, &stages, &not_elig, &errors).unwrap();
         assert!(out.csv.exists());
         let csv = std::fs::read_to_string(&out.csv).unwrap();
         assert!(csv.contains("address,stage,max_mint"));
@@ -273,6 +303,12 @@ mod wl_export_tests {
         assert!(stage_txt.contains("0xabc"));
         let ne = std::fs::read_to_string(&out.not_eligible).unwrap();
         assert!(ne.contains("0xdef"));
+        assert!(
+            ne.contains("0xbad"),
+            "errors stay in not_eligible.txt for existing users"
+        );
+        let err = std::fs::read_to_string(&out.errors).unwrap();
+        assert_eq!(err.trim(), "0xbad");
         let _ = std::fs::remove_dir_all(&out.dir);
         let _ = dir; // silence
     }

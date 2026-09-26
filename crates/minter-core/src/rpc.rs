@@ -907,18 +907,50 @@ impl RpcClient {
 
     pub async fn transaction_receipt(&self, hash: &B256) -> Result<Option<serde_json::Value>> {
         let hash_hex = format!("0x{}", hex::encode(hash.as_slice()));
-        let mut last_error = None;
-        for (attempt, url) in self.urls.iter().take(self.tuning.max_nodes).enumerate() {
-            match self
-                .rpc_call(url, "eth_getTransactionReceipt", json!([hash_hex]))
+        let urls: Vec<String> = self
+            .urls
+            .iter()
+            .take(self.tuning.max_nodes)
+            .cloned()
+            .collect();
+        let lead = urls.first().cloned();
+        // All nodes are asked at once. In series, a pending tx cost one full
+        // round trip per node on every poll, and a hung node stalled the lookup
+        // for the whole 30s client timeout.
+        let call_timeout = self.tuning.call_timeout;
+        let mut set = tokio::task::JoinSet::new();
+        for url in urls {
+            let client = self.client.clone();
+            let id = self
+                .next_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let params = json!([hash_hex]);
+            set.spawn(async move {
+                let res = tokio::time::timeout(
+                    call_timeout,
+                    Self::rpc_call_with_client(
+                        client,
+                        url.clone(),
+                        id,
+                        "eth_getTransactionReceipt",
+                        params,
+                    ),
+                )
                 .await
-            {
-                Ok(result) => {
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("timeout {}ms", call_timeout.as_millis())));
+                (url, res)
+            });
+        }
+        let mut last_error = None;
+        while let Some(joined) = set.join_next().await {
+            match joined {
+                Ok((url, Ok(result))) => {
                     if !result.is_null() {
-                        if attempt > 0 {
-                            crate::rlog!("RPC receipt OK via {}", Self::short_url(url));
+                        if lead.as_deref() != Some(url.as_str()) {
+                            crate::rlog!("RPC receipt OK via {}", Self::short_url(&url));
                         }
-                        // Any node that has the receipt is authoritative.
+                        // Any node that has the receipt is authoritative; dropping
+                        // the set aborts the lookups still in flight.
                         return Ok(Some(result));
                     }
                     // A single node's `null` is NOT authoritative — it may just be
@@ -927,11 +959,11 @@ impl RpcClient {
                     // "not found" is exactly how a double mint happens (see
                     // find_landed's contract below).
                 }
-                Err(e) => {
-                    crate::rlog!("RPC receipt failed via {}: {}", Self::short_url(url), e);
+                Ok((url, Err(e))) => {
+                    crate::rlog!("RPC receipt failed via {}: {}", Self::short_url(&url), e);
                     last_error = Some(e);
-                    tokio::time::sleep(Duration::from_millis(150)).await;
                 }
+                Err(e) => last_error = Some(anyhow::anyhow!("receipt lookup task: {e}")),
             }
         }
         // No node had the receipt. Only report "absent" (`Ok(None)`) when EVERY
@@ -968,7 +1000,10 @@ impl RpcClient {
         }
         let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
         let started = std::time::Instant::now();
-        let mut poll_interval = Duration::from_millis(100);
+        // Lookups hit every node in parallel now, so each poll returns sooner;
+        // starting at 250ms keeps the request rate where it was with serial
+        // lookups (no block lands within the first few hundred ms anyway).
+        let mut poll_interval = Duration::from_millis(250);
         let mut warned = false;
         while std::time::Instant::now() < deadline {
             for hash in hashes {
@@ -1380,6 +1415,44 @@ mod tests {
         let got = rpc.find_landed(&[a_hash(4)]).await;
         assert!(matches!(got, ReceiptLookup::Unknown), "got {got:?}");
         assert!(!got.is_definitely_absent());
+    }
+
+    #[tokio::test]
+    async fn a_receipt_on_a_fast_node_is_not_held_up_by_a_slow_one() {
+        let found = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"status\":\"0x1\",\
+                     \"gasUsed\":\"0x5208\",\"blockNumber\":\"0x10\"}}"
+            .to_string();
+        let slow = spawn_mock(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}".to_string(),
+            Duration::from_secs(3),
+        );
+        let fast = spawn_mock(found, Duration::ZERO);
+        // The slow node is the lead: serial lookups waited for it first.
+        let rpc = RpcClient::new(vec![slow, fast]);
+        let started = std::time::Instant::now();
+        let got = rpc.transaction_receipt(&a_hash(5)).await.unwrap();
+        assert!(got.is_some());
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_null_from_one_node_and_an_error_from_another_is_unknown() {
+        let null = spawn_mock(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}".to_string(),
+            Duration::ZERO,
+        );
+        let broken = spawn_mock(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"boom\"}}"
+                .to_string(),
+            Duration::ZERO,
+        );
+        let rpc = RpcClient::new(vec![null, broken]);
+        let got = rpc.find_landed(&[a_hash(6)]).await;
+        assert!(matches!(got, ReceiptLookup::Unknown), "got {got:?}");
     }
 
     #[test]
